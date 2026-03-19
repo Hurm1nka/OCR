@@ -1,0 +1,6 @@
+paddleocr
+opencv-python
+numpy
+flask
+flask-cors
+gunicorn

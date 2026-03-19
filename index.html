@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OCR Номерных Знаков РФ (Веб-сервис)</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap');
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f7f9fb;
+        }
+        .container {
+            max-width: 600px;
+        }
+        .loader {
+            border-top-color: #3b82f6;
+            -webkit-animation: spin 1s ease-in-out infinite;
+            animation: spin 1s ease-in-out infinite;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        #videoElement {
+            width: 100%;
+            height: auto;
+            max-height: 400px;
+            object-fit: cover;
+        }
+        #canvasElement {
+            display: none;
+        }
+    </style>
+</head>
+<body class="p-4 md:p-8">
+
+<div class="container mx-auto bg-white shadow-xl rounded-2xl p-6 md:p-10 border border-gray-100">
+    <h1 class="text-3xl font-extrabold text-gray-800 mb-2">📸 OCR Номерных Знаков РФ</h1>
+    <p class="text-gray-500 mb-6">Используйте камеру или загрузите файл. Анализ выполняется локальным Docker-сервисом.</p>
+
+    <div id="serviceStatus" class="p-3 bg-yellow-100 text-yellow-700 rounded-lg mb-6 text-center font-medium">
+        ⏳ Проверка статуса локального OCR-сервиса...
+    </div>
+
+    <div id="liveCaptureSection" class="p-4 bg-gray-50 rounded-xl border border-gray-200 mb-6">
+        <h3 class="text-xl font-semibold text-gray-700 mb-3">Режим: Прямой захват</h3>
+        
+        <video id="videoElement" autoplay playsinline class="w-full max-h-96 rounded-lg bg-black object-cover hidden"></video>
+        <canvas id="canvasElement"></canvas>
+
+        <button id="startCameraButton" class="w-full px-4 py-3 bg-green-600 text-white font-semibold rounded-xl shadow-lg hover:bg-green-700 transition duration-300 mt-4">
+            <span id="startStopText">Запустить Камеру</span>
+        </button>
+
+        <button id="captureAndProcessButton" 
+                class="w-full px-4 py-3 bg-indigo-600 text-white font-semibold rounded-xl shadow-lg hover:bg-indigo-700 transition duration-300 disabled:opacity-50 flex items-center justify-center mt-3"
+                disabled>
+            <span id="captureButtonText">Сделать Снимок и Найти Номер</span>
+            <div id="loadingIndicatorCapture" class="loader w-5 h-5 border-2 border-white border-solid rounded-full hidden ml-2"></div>
+        </button>
+    </div>
+    
+    <div class="relative flex py-5 items-center">
+        <div class="flex-grow border-t border-gray-300"></div>
+        <span class="flex-shrink mx-4 text-gray-500 text-sm font-medium">ИЛИ</span>
+        <div class="flex-grow border-t border-gray-300"></div>
+    </div>
+
+
+    <div id="fileUploadSection" class="space-y-4 p-4 bg-white rounded-xl border border-gray-200">
+        <h3 class="text-xl font-semibold text-gray-700 mb-3">Режим: Загрузка файла</h3>
+        <label for="imageUpload" class="block text-sm font-medium text-gray-700">Выберите файл с телефона/диска:</label>
+        <input type="file" id="imageUpload" accept="image/*" class="w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100 cursor-pointer">
+        
+        <button id="processFileButton" 
+                class="w-full px-4 py-3 bg-blue-600 text-white font-semibold rounded-xl shadow-lg hover:bg-blue-700 transition duration-300 disabled:opacity-50 flex items-center justify-center"
+                disabled>
+            <span id="fileButtonText">Обработать Загруженный Файл</span>
+            <div id="loadingIndicatorFile" class="loader w-5 h-5 border-2 border-white border-solid rounded-full hidden ml-2"></div>
+        </button>
+    </div>
+
+
+    <div id="resultsContainer" class="mt-8 pt-6 border-t border-gray-200 hidden">
+        <h2 class="text-2xl font-semibold text-gray-800 mb-4">Результат анализа</h2>
+
+        <div class="bg-blue-50 border-l-4 border-blue-500 text-blue-800 p-4 rounded-lg mb-4" role="alert">
+            <p class="font-bold text-lg">Номер:</p>
+            <p id="plateOutput" class="text-4xl font-extrabold"></p>
+        </div>
+
+        <div id="noPlateWarning" class="bg-yellow-50 border-l-4 border-yellow-500 text-yellow-800 p-4 rounded-lg hidden">
+            <p class="font-bold">⚠️ Номер не найден.</p>
+            <p class="text-sm">Строгий 6-символьный шаблон РФ (L DDD LL) не обнаружен.</p>
+        </div>
+        
+        <p class="text-sm text-gray-600 mt-4 font-medium">Объяснение модели:</p>
+        <p id="explanationOutput" class="text-gray-700 text-xs italic whitespace-normal break-all"></p>
+
+        <p class="text-sm text-gray-600 mt-6 font-medium">Последний обработанный кадр/файл:</p>
+        <img id="imagePreview" src="" alt="Загруженное изображение" class="mt-2 w-full h-auto rounded-lg shadow-md border border-gray-200 object-contain" style="max-height: 400px;">
+    </div>
+
+    <div id="errorContainer" class="mt-8 bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded relative hidden" role="alert">
+        <strong class="font-bold">Ошибка!</strong>
+        <span id="errorMessage" class="block sm:inline"></span>
+    </div>
+
+</div>
+
+<script>
+    const resultsContainer = document.getElementById('resultsContainer');
+    const plateOutput = document.getElementById('plateOutput');
+    const explanationOutput = document.getElementById('explanationOutput');
+    const imagePreview = document.getElementById('imagePreview');
+    const errorContainer = document.getElementById('errorContainer');
+    const errorMessage = document.getElementById('errorMessage');
+    const noPlateWarning = document.getElementById('noPlateWarning');
+    const serviceStatus = document.getElementById('serviceStatus');
+
+    const videoElement = document.getElementById('videoElement');
+    const canvasElement = document.getElementById('canvasElement');
+    const startCameraButton = document.getElementById('startCameraButton');
+    const startStopText = document.getElementById('startStopText');
+    const captureAndProcessButton = document.getElementById('captureAndProcessButton');
+    const loadingIndicatorCapture = document.getElementById('loadingIndicatorCapture');
+
+    const imageUpload = document.getElementById('imageUpload');
+    const processFileButton = document.getElementById('processFileButton');
+    const loadingIndicatorFile = document.getElementById('loadingIndicatorFile');
+
+
+    const OCR_SERVICE_URL = '/process';
+    const HEALTH_CHECK_URL = '/health';
+
+    let currentStream = null;
+
+    function displayError(message) {
+        errorContainer.classList.remove('hidden');
+        errorMessage.textContent = message;
+    }
+    
+    function clearError() {
+        errorContainer.classList.add('hidden');
+        errorMessage.textContent = '';
+    }
+
+    function setLoadingState(isLoading, indicator) {
+        const button = indicator === loadingIndicatorCapture ? captureAndProcessButton : processFileButton;
+        const textSpan = indicator === loadingIndicatorCapture ? document.getElementById('captureButtonText') : document.getElementById('fileButtonText');
+        const defaultText = indicator === loadingIndicatorCapture ? 'Сделать Снимок и Найти Номер' : 'Обработать Загруженный Файл';
+
+        button.disabled = isLoading;
+        indicator.classList.toggle('hidden', !isLoading);
+        textSpan.textContent = isLoading ? 'Анализ...' : defaultText;
+    }
+    
+    async function checkServiceStatus() {
+        try {
+            const response = await fetch(HEALTH_CHECK_URL, { method: 'GET' });
+            
+            if (response.ok) { 
+                const data = await response.json();
+                if (data.status === "OK" && data.model_loaded) {
+                    serviceStatus.classList.remove('bg-yellow-100', 'text-yellow-700', 'bg-red-100', 'text-red-700');
+                    serviceStatus.classList.add('bg-green-100', 'text-green-700');
+                    serviceStatus.innerHTML = '✅ Локальный сервис OCR запущен и готов к работе!';
+                    return true;
+                }
+            }
+        } catch (e) {
+            // Service not reachable
+        }
+        
+        serviceStatus.classList.remove('bg-yellow-100', 'text-yellow-700', 'bg-green-100', 'text-green-700');
+        serviceStatus.classList.add('bg-red-100', 'text-red-700');
+        serviceStatus.innerHTML = '⚠️ Сервис OCR (бэкенд) не доступен на <code>http://localhost:5000</code>. Пожалуйста, запустите Docker-контейнер.';
+        return false;
+    }
+    
+    async function processImage(base64Image, loadingIndicator) {
+        clearError();
+        setLoadingState(true, loadingIndicator);
+        resultsContainer.classList.add('hidden');
+        noPlateWarning.classList.add('hidden');
+        
+        const isServiceReady = await checkServiceStatus();
+        if (!isServiceReady) {
+            displayError("Локальный сервис OCR не запущен. Пожалуйста, запустите Docker-контейнер.");
+            setLoadingState(false, loadingIndicator);
+            return;
+        }
+
+        const payload = { image_data: base64Image };
+
+        try {
+            const response = await fetch(OCR_SERVICE_URL, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+            
+            const result = await response.json();
+            
+            if (!response.ok) {
+                throw new Error(result.error || `Ошибка бэкенда! Статус: ${response.status}`);
+            }
+            
+            plateOutput.textContent = result.plate.toUpperCase() || '—';
+            explanationOutput.textContent = result.confidence_explanation || 'Нет дополнительного объяснения.';
+            
+            if (result.plate) {
+                noPlateWarning.classList.add('hidden');
+            } else {
+                noPlateWarning.classList.remove('hidden');
+            }
+            
+            resultsContainer.classList.remove('hidden');
+
+        } catch (e) {
+            console.error("Local Service Call failed:", e);
+            displayError(`Не удалось выполнить анализ изображения: ${e.message}.`);
+        } finally {
+            setLoadingState(false, loadingIndicator);
+        }
+    }
+
+    async function startVideoStream() {
+        clearError();
+        if (currentStream) {
+            currentStream.getTracks().forEach(track => track.stop());
+            currentStream = null;
+            startStopText.textContent = 'Запустить Камеру';
+            videoElement.classList.add('hidden');
+            captureAndProcessButton.disabled = true;
+            return;
+        }
+
+        try {
+            const constraints = {
+                video: {
+                    facingMode: 'environment', 
+                    width: { ideal: 1280 },
+                    height: { ideal: 720 }
+                }
+            };
+            currentStream = await navigator.mediaDevices.getUserMedia(constraints);
+            videoElement.srcObject = currentStream;
+            videoElement.play();
+            videoElement.classList.remove('hidden');
+            startStopText.textContent = 'Остановить Камеру';
+            captureAndProcessButton.disabled = false;
+        } catch (err) {
+            console.error("Error accessing camera: ", err);
+            displayError("Не удалось получить доступ к камере. Убедитесь, что разрешение предоставлено.");
+            startStopText.textContent = 'Ошибка Камеры';
+        }
+    }
+
+    function captureFrame() {
+        if (!currentStream || videoElement.paused || videoElement.ended) {
+            displayError("Поток камеры неактивен.");
+            return;
+        }
+
+        const width = videoElement.videoWidth;
+        const height = videoElement.videoHeight;
+        canvasElement.width = width;
+        canvasElement.height = height;
+
+        const ctx = canvasElement.getContext('2d');
+        ctx.drawImage(videoElement, 0, 0, width, height);
+
+        const mimeType = 'image/jpeg';
+        const dataURL = canvasElement.toDataURL(mimeType, 0.9);
+        const base64Image = dataURL.split(',')[1];
+        
+        imagePreview.src = dataURL;
+
+        processImage(base64Image, loadingIndicatorCapture);
+    }
+    
+    // --- EVENT LISTENERS ---
+    startCameraButton.addEventListener('click', startVideoStream);
+    captureAndProcessButton.addEventListener('click', captureFrame);
+
+    imageUpload.addEventListener('change', function(event) {
+        processFileButton.disabled = true;
+        imagePreview.src = '';
+        clearError();
+
+        const file = event.target.files[0];
+        if (file) {
+            processFileButton.disabled = false;
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                imagePreview.src = e.target.result;
+            };
+            reader.readAsDataURL(file);
+        }
+    });
+
+    processFileButton.addEventListener('click', () => {
+        const file = imageUpload.files[0];
+        if (!file) {
+            displayError('Пожалуйста, сначала загрузите изображение.');
+            return;
+        }
+
+        const reader = new FileReader();
+        reader.onload = function(e) {
+            const base64Data = e.target.result;
+            const base64Image = base64Data.split(',')[1];
+            
+            processImage(base64Image, loadingIndicatorFile);
+        };
+        reader.readAsDataURL(file);
+    });
+    
+    // Initial service check and periodic checks
+    window.onload = checkServiceStatus;
+    setInterval(checkServiceStatus, 5000);
+
+</script>
+</body>
+</html>
