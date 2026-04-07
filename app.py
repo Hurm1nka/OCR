@@ -15,7 +15,29 @@ from flask_cors import CORS
 app = Flask(__name__)
 CORS(app) 
 
-logging.getLogger("ppocr").setLevel(logging.ERROR) 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+)
+logger = logging.getLogger("ocr-service")
+logging.getLogger("ppocr").setLevel(logging.ERROR)
+
+@app.before_request
+def log_request():
+    # Короткий лог каждого входящего запроса
+    logger.info(
+        "REQ %s %s from=%s ct=%s len=%s",
+        request.method,
+        request.path,
+        request.headers.get("X-Forwarded-For", request.remote_addr),
+        request.content_type,
+        request.content_length,
+    )
+
+@app.after_request
+def log_response(response):
+    logger.info("RES %s %s -> %s", request.method, request.path, response.status)
+    return response
 
 print("Загрузка модели PaddleOCR...")
 try:
@@ -29,6 +51,7 @@ try:
 except Exception as e:
     print(f"❌ ОШИБКА ЗАГРУЗКИ МОДЕЛИ: {e}")
     ocr_reader = None
+    logger.exception("PaddleOCR init failed")
 
 VALID_LETTERS = "АВЕКМНОРСТУХ"
 VALID_DIGITS = "0123456789"
@@ -226,13 +249,15 @@ def process_ocr_pipeline(image_array):
 
 @app.route('/process', methods=['POST'])
 def process_data():
-    data = request.json
+    data = request.get_json(silent=True) or {}
     base64_img = data.get('image_data')
     
     if not base64_img:
+        logger.warning("process: missing image_data")
         return jsonify({"error": "Нет данных"}), 400
 
     try:
+        logger.info("process: received image_data chars=%s", len(base64_img))
         image_bytes = base64.b64decode(base64_img)
         np_arr = np.frombuffer(image_bytes, np.uint8)
         img = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
@@ -241,6 +266,7 @@ def process_data():
             raise ValueError("Ошибка декодирования")
 
         explanation, plate, conf = process_ocr_pipeline(img)
+        logger.info("process: plate=%r conf=%.4f", plate, conf)
 
         if plate:
             res = {
@@ -256,11 +282,14 @@ def process_data():
         return jsonify(res), 200
 
     except Exception as e:
+        logger.exception("process: failed: %s", e)
         return jsonify({"error": str(e)}), 500
 
 @app.route('/health', methods=['GET'])
 def health():
-    return jsonify({"status": "OK", "ready": ocr_reader is not None}), 200
+    ready = ocr_reader is not None
+    # Важно: фронт сейчас ожидает model_loaded; оставляем совместимость
+    return jsonify({"status": "OK", "ready": ready, "model_loaded": ready}), 200
 
 # =================================================================
 # RUN

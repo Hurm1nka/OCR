@@ -160,10 +160,13 @@
     
     async function checkServiceStatus() {
         try {
+            console.debug("[OCR] health check", { url: HEALTH_CHECK_URL, origin: window.location.origin });
             const response = await fetch(HEALTH_CHECK_URL, { method: 'GET' });
+            console.debug("[OCR] health response", { ok: response.ok, status: response.status });
             
             if (response.ok) { 
                 const data = await response.json();
+                console.debug("[OCR] health json", data);
                 if (data.status === "OK" && data.model_loaded) {
                     serviceStatus.classList.remove('bg-yellow-100', 'text-yellow-700', 'bg-red-100', 'text-red-700');
                     serviceStatus.classList.add('bg-green-100', 'text-green-700');
@@ -172,6 +175,7 @@
                 }
             }
         } catch (e) {
+            console.error("[OCR] health check failed", e);
             // Service not reachable
         }
         
@@ -197,13 +201,16 @@
         const payload = { image_data: base64Image };
 
         try {
+            console.debug("[OCR] process request", { url: OCR_SERVICE_URL, payloadChars: base64Image?.length });
             const response = await fetch(OCR_SERVICE_URL, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(payload)
             });
             
+            console.debug("[OCR] process response", { ok: response.ok, status: response.status });
             const result = await response.json();
+            console.debug("[OCR] process json", result);
             
             if (!response.ok) {
                 throw new Error(result.error || `Ошибка бэкенда! Статус: ${response.status}`);
