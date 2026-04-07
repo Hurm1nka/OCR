@@ -134,6 +134,7 @@
 
     const OCR_SERVICE_URL = '/process';
     const HEALTH_CHECK_URL = '/health';
+    const SERVICE_ORIGIN = window.location.origin;
 
     let currentStream = null;
 
@@ -176,7 +177,7 @@
         
         serviceStatus.classList.remove('bg-yellow-100', 'text-yellow-700', 'bg-green-100', 'text-green-700');
         serviceStatus.classList.add('bg-red-100', 'text-red-700');
-        serviceStatus.innerHTML = '⚠️ Сервис OCR (бэкенд) не доступен на <code>http://localhost:5000</code>. Пожалуйста, запустите Docker-контейнер.';
+        serviceStatus.innerHTML = `⚠️ Сервис OCR (бэкенд) не доступен на <code>${SERVICE_ORIGIN}</code>. Пожалуйста, запустите Docker-контейнер.`;
         return false;
     }
     
