@@ -240,11 +240,7 @@
 
         try {
             const constraints = {
-                video: {
-                    facingMode: 'environment', 
-                    width: { ideal: 1280 },
-                    height: { ideal: 720 }
-                }
+                video: true,    // разрешение камеры
             };
             currentStream = await navigator.mediaDevices.getUserMedia(constraints);
             videoElement.srcObject = currentStream;
