@@ -35,5 +35,5 @@ COPY index.html .
 # Открываем порт для flask (бэкенд)
 EXPOSE 5000
 
-# Команда для запуска веб-сервера Gunicorn
-CMD ["gunicorn", "--bind", "0.0.0.0:5000", "app:app"]
+# Команда для запуска веб-сервера Gunicorn (логи запросов в stdout)
+CMD ["gunicorn", "--access-logfile", "-", "--error-logfile", "-", "--bind", "0.0.0.0:5000", "app:app"]

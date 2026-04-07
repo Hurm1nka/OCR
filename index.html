@@ -3,6 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate">
     <title>OCR Номерных Знаков РФ (Веб-сервис)</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
@@ -132,9 +133,16 @@
     const loadingIndicatorFile = document.getElementById('loadingIndicatorFile');
 
 
-    const OCR_SERVICE_URL = '/process';
-    const HEALTH_CHECK_URL = '/health';
-    const SERVICE_ORIGIN = window.location.origin;
+    const API_FROM_QUERY = new URLSearchParams(window.location.search).get('api');
+    const API_BASE = (() => {
+        const q = API_FROM_QUERY && API_FROM_QUERY.trim();
+        if (q) return q.replace(/\/$/, '');
+        if (window.location.protocol === 'file:') return 'http://127.0.0.1:3020';
+        return '';
+    })();
+    const OCR_SERVICE_URL = API_BASE ? `${API_BASE}/process` : '/process';
+    const HEALTH_CHECK_URL = API_BASE ? `${API_BASE}/health` : '/health';
+    const SERVICE_ORIGIN = API_BASE || window.location.origin;
 
     let currentStream = null;
 

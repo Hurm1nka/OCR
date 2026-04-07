@@ -6,12 +6,13 @@ import numpy as np
 import base64
 from paddleocr import PaddleOCR
 import logging
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS 
 
 # =================================================================
 # НАСТРОЙКИ И ИНИЦИАЛИЗАЦИЯ
 # =================================================================
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 app = Flask(__name__)
 CORS(app) 
 
@@ -246,6 +247,14 @@ def process_ocr_pipeline(image_array):
 # =================================================================
 # FLASK ROUTES
 # =================================================================
+
+@app.route('/')
+@app.route('/index.html')
+def index_page():
+    resp = send_from_directory(BASE_DIR, 'index.html')
+    resp.headers['Cache-Control'] = 'no-store, max-age=0, must-revalidate'
+    return resp
+
 
 @app.route('/process', methods=['POST'])
 def process_data():
