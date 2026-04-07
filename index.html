@@ -1,8 +1,11 @@
 <!DOCTYPE html>
+<!-- ocr-ui: v4 (health/process relative to page dir, e.g. /ocr/health behind nginx) -->
 <html lang="ru">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <!-- Если сайт за nginx без прокси /health и /process — укажите полный URL API (часто тот же хост): -->
+    <meta name="ocr-api-base" content="">
     <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate">
     <title>OCR Номерных Знаков РФ (Веб-сервис)</title>
     <script src="https://cdn.tailwindcss.com"></script>
@@ -133,16 +136,44 @@
     const loadingIndicatorFile = document.getElementById('loadingIndicatorFile');
 
 
+    function pageDirectoryBaseHref() {
+        const u = new URL(window.location.href);
+        let p = u.pathname;
+        if (!p.endsWith('/')) {
+            if (p.lastIndexOf('/') > 0) {
+                p = p.slice(0, p.lastIndexOf('/') + 1);
+            } else {
+                p = p + '/';
+            }
+        }
+        u.pathname = p || '/';
+        return u.href;
+    }
+
     const API_FROM_QUERY = new URLSearchParams(window.location.search).get('api');
-    const API_BASE = (() => {
-        const q = API_FROM_QUERY && API_FROM_QUERY.trim();
-        if (q) return q.replace(/\/$/, '');
-        if (window.location.protocol === 'file:') return 'http://127.0.0.1:3020';
-        return '';
-    })();
-    const OCR_SERVICE_URL = API_BASE ? `${API_BASE}/process` : '/process';
-    const HEALTH_CHECK_URL = API_BASE ? `${API_BASE}/health` : '/health';
-    const SERVICE_ORIGIN = API_BASE || window.location.origin;
+    const API_FROM_META = document.querySelector('meta[name="ocr-api-base"]')?.getAttribute('content')?.trim();
+
+    let OCR_SERVICE_URL;
+    let HEALTH_CHECK_URL;
+    const q = API_FROM_QUERY && API_FROM_QUERY.trim();
+    const m = API_FROM_META && API_FROM_META.trim();
+    if (q) {
+        const base = q.replace(/\/$/, '');
+        OCR_SERVICE_URL = `${base}/process`;
+        HEALTH_CHECK_URL = `${base}/health`;
+    } else if (m) {
+        const base = m.replace(/\/$/, '');
+        OCR_SERVICE_URL = `${base}/process`;
+        HEALTH_CHECK_URL = `${base}/health`;
+    } else if (window.location.protocol === 'file:') {
+        const base = 'http://127.0.0.1:3020';
+        OCR_SERVICE_URL = `${base}/process`;
+        HEALTH_CHECK_URL = `${base}/health`;
+    } else {
+        const dir = pageDirectoryBaseHref();
+        HEALTH_CHECK_URL = new URL('health', dir).href;
+        OCR_SERVICE_URL = new URL('process', dir).href;
+    }
 
     let currentStream = null;
 
@@ -169,7 +200,7 @@
     async function checkServiceStatus() {
         try {
             console.debug("[OCR] health check", { url: HEALTH_CHECK_URL, origin: window.location.origin });
-            const response = await fetch(HEALTH_CHECK_URL, { method: 'GET' });
+            const response = await fetch(HEALTH_CHECK_URL, { method: 'GET', mode: 'cors', cache: 'no-store' });
             console.debug("[OCR] health response", { ok: response.ok, status: response.status });
             
             if (response.ok) { 
@@ -189,7 +220,10 @@
         
         serviceStatus.classList.remove('bg-yellow-100', 'text-yellow-700', 'bg-green-100', 'text-green-700');
         serviceStatus.classList.add('bg-red-100', 'text-red-700');
-        serviceStatus.innerHTML = `⚠️ Сервис OCR (бэкенд) не доступен на <code>${SERVICE_ORIGIN}</code>. Пожалуйста, запустите Docker-контейнер.`;
+        serviceStatus.innerHTML =
+            `⚠️ Не отвечает <code>${HEALTH_CHECK_URL}</code> (страница: <code>${window.location.pathname}</code>). ` +
+            `За nginx в подкаталоге (например <code>/ocr/</code>) проксируйте <code>/ocr/health</code> и <code>/ocr/process</code> на бэкенд, ` +
+            `либо укажите базу API в <code>&lt;meta name=&quot;ocr-api-base&quot;&gt;</code> или <code>?api=…</code>.`;
         return false;
     }
     
@@ -212,6 +246,8 @@
             console.debug("[OCR] process request", { url: OCR_SERVICE_URL, payloadChars: base64Image?.length });
             const response = await fetch(OCR_SERVICE_URL, {
                 method: 'POST',
+                mode: 'cors',
+                cache: 'no-store',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(payload)
             });
