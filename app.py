@@ -7,7 +7,6 @@ import base64
 import urllib.request
 from paddleocr import PaddleOCR
 import logging
-from logging.handlers import RotatingFileHandler
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS 
 
@@ -18,19 +17,12 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 app = Flask(__name__)
 CORS(app) 
 
-LOG_PATH = os.path.join(BASE_DIR, "ocr_service.log")
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
-    handlers=[
-        logging.StreamHandler(),
-        RotatingFileHandler(LOG_PATH, maxBytes=2_000_000, backupCount=3, encoding="utf-8"),
-    ],
-    force=True,
 )
 logger = logging.getLogger("ocr-service")
 logging.getLogger("ppocr").setLevel(logging.ERROR)
-logger.info("Service logging initialized. Log file: %s", LOG_PATH)
 
 @app.before_request
 def log_request():
@@ -241,7 +233,7 @@ def generate_image_variants(img):
 
 def process_ocr_pipeline(image_array):
     if ocr_reader is None:
-        return "Модель не готова", None, "", 0.0
+        return "Модель не готова", "OCR pipeline не запущен: модель не готова", None, "", 0.0
 
     variants = generate_image_variants(image_array)
 
@@ -314,8 +306,12 @@ def process_ocr_pipeline(image_array):
         except Exception as e:
             logs.append(f"Fallback error: {e}")
 
-    explanation = " | ".join(logs[-8:]) if logs else "OCR не нашел подходящих текстовых боксов"
-    return explanation, best_plate, best_region, best_confidence
+    ocr_log = " | ".join(logs[-8:]) if logs else "OCR не нашел подходящих текстовых боксов"
+    if best_plate:
+        model_explanation = f"Обнаружен шаблон номера. Уверенность OCR: {best_confidence:.2f}."
+    else:
+        model_explanation = "Шаблон номера РФ не обнаружен."
+    return model_explanation, ocr_log, best_plate, best_region, best_confidence
 
 
 def decode_image_from_bytes(image_bytes):
@@ -351,7 +347,7 @@ def process_data():
         image_bytes = base64.b64decode(base64_img)
         img = decode_image_from_bytes(image_bytes)
 
-        explanation, plate, region, conf = process_ocr_pipeline(img)
+        model_explanation, ocr_log, plate, region, conf = process_ocr_pipeline(img)
         logger.info("process: plate=%r region=%r conf=%.4f", plate, region, conf)
         full_plate = f"{plate}{region}" if plate else ""
 
@@ -360,14 +356,18 @@ def process_data():
                 "plate": full_plate,
                 "plate_base": plate,
                 "region": region,
-                "confidence_explanation": f"Найден: {full_plate} ({conf:.2f}). Лог: {explanation}"
+                "confidence_explanation": f"Найден: {full_plate} ({conf:.2f}).",
+                "model_explanation": model_explanation,
+                "ocr_log": ocr_log,
             }
         else:
             res = {
                 "plate": "",
                 "plate_base": "",
                 "region": "",
-                "confidence_explanation": f"Не найдено. Лог: {explanation}"
+                "confidence_explanation": "Не найдено.",
+                "model_explanation": model_explanation,
+                "ocr_log": ocr_log,
             }
 
         return jsonify(res), 200
@@ -395,7 +395,7 @@ def process_ip_camera():
             image_bytes = response.read()
 
         img = decode_image_from_bytes(image_bytes)
-        explanation, plate, region, conf = process_ocr_pipeline(img)
+        model_explanation, ocr_log, plate, region, conf = process_ocr_pipeline(img)
         logger.info("process_ip_camera: plate=%r region=%r conf=%.4f", plate, region, conf)
         full_plate = f"{plate}{region}" if plate else ""
 
@@ -404,11 +404,9 @@ def process_ip_camera():
             "plate": full_plate,
             "plate_base": plate or "",
             "region": region or "",
-            "confidence_explanation": (
-                f"Найден: {full_plate} ({conf:.2f}). Лог: {explanation}"
-                if plate else
-                f"Не найдено. Лог: {explanation}"
-            ),
+            "confidence_explanation": (f"Найден: {full_plate} ({conf:.2f})." if plate else "Не найдено."),
+            "model_explanation": model_explanation,
+            "ocr_log": ocr_log,
             "preview_data_url": f"data:image/jpeg;base64,{preview_b64}",
         }
         return jsonify(res), 200
@@ -434,7 +432,7 @@ def process_local_camera():
             logger.error("process_local_camera: failed to read frame index=%s", camera_index)
             return jsonify({"error": "Не удалось получить кадр с локальной камеры"}), 500
 
-        explanation, plate, region, conf = process_ocr_pipeline(frame)
+        model_explanation, ocr_log, plate, region, conf = process_ocr_pipeline(frame)
         full_plate = f"{plate}{region}" if plate else ""
         logger.info("process_local_camera: plate=%r region=%r conf=%.4f", plate, region, conf)
 
@@ -448,11 +446,9 @@ def process_local_camera():
             "plate": full_plate,
             "plate_base": plate or "",
             "region": region or "",
-            "confidence_explanation": (
-                f"Найден: {full_plate} ({conf:.2f}). Лог: {explanation}"
-                if plate else
-                f"Не найдено. Лог: {explanation}"
-            ),
+            "confidence_explanation": (f"Найден: {full_plate} ({conf:.2f})." if plate else "Не найдено."),
+            "model_explanation": model_explanation,
+            "ocr_log": ocr_log,
             "preview_data_url": preview_data_url,
         }), 200
     except Exception as e:
