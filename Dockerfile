@@ -28,10 +28,14 @@ RUN pip install --no-cache-dir \
 # Устанавливаем рабочую директорию
 WORKDIR /app
 
-# Копируем файлы приложения
-COPY app.py .
-COPY index.html .
-COPY gunicorn.conf.py .
+# Старый код в образе чаще всего из-за кэша слоёв Docker.
+# Полная пересборка: docker build --no-cache -t ocr-service:1 .
+# Только обновить слой с приложением (без переустановки pip): см. CACHEBUST ниже.
+ARG CACHEBUST=0
+RUN echo "build=${CACHEBUST}"
+
+# Копируем файлы приложения (этот слой пересобирается после смены CACHEBUST или после правок файлов)
+COPY app.py index.html gunicorn.conf.py ./
 
 # Ограничение потоков BLAS/OpenMP снижает риск OOM и «штормов» CPU в контейнере
 ENV OMP_NUM_THREADS=2 \
