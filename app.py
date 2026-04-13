@@ -4,6 +4,7 @@ import re
 import cv2
 import numpy as np
 import base64
+import urllib.request
 from paddleocr import PaddleOCR
 import logging
 from flask import Flask, request, jsonify, send_from_directory
@@ -68,7 +69,8 @@ LETTER_TO_DIGIT = {
     'O': '0', 'О': '0', 'D': '0', 'Q': '0',
     'B': '8', 'В': '8',
     'I': '1', 'L': '1',
-    'Z': '7',
+    'Z': '2',
+    'Т': '7', 'T': '7',
     'S': '5', 'G': '6'
 }
 
@@ -181,6 +183,14 @@ def generate_image_variants(img):
     )
     variants.append(adaptive)
 
+    adaptive_inv = cv2.adaptiveThreshold(
+        gray, 255,
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY_INV,
+        11, 2
+    )
+    variants.append(adaptive_inv)
+
     return variants
 
 # =================================================================
@@ -202,6 +212,7 @@ def process_ocr_pipeline(image_array):
             result = ocr_reader.ocr(img_variant, cls=False)
 
             if not result or not result[0]:
+                logs.append(f"Var{i}: OCR не вернул текст")
                 continue
 
             for line in result[0]:
@@ -216,11 +227,13 @@ def process_ocr_pipeline(image_array):
                 height = max(y_coords) - min(y_coords)
 
                 if height == 0:
+                    logs.append(f"Var{i}: пропуск бокса (height=0)")
                     continue
 
                 ratio = width / height
 
-                if ratio < 2.0:
+                if ratio < 1.2:
+                    logs.append(f"Var{i}: '{raw_text}' пропуск ratio={ratio:.2f}")
                     continue
 
                 normalized = normalize_chars(raw_text)
@@ -238,11 +251,33 @@ def process_ocr_pipeline(image_array):
                 break
 
         except Exception as e:
-            print(f"Ошибка на варианте {i}: {e}")
+            logs.append(f"Var{i}: ошибка OCR {e}")
             continue
 
-    explanation = " | ".join(logs[-5:])
+    if not best_plate:
+        try:
+            fallback_result = ocr_reader.ocr(image_array, cls=False)
+            if fallback_result and fallback_result[0]:
+                merged = "".join([line[1][0] for line in fallback_result[0]])
+                normalized = normalize_chars(merged)
+                fixed_plate = try_fix_plate(normalized)
+                logs.append(f"Fallback merged: '{merged}' -> '{normalized}' -> '{fixed_plate}'")
+                if fixed_plate and PLATE_REGEX.match(fixed_plate):
+                    best_plate = fixed_plate
+                    best_confidence = 0.5
+        except Exception as e:
+            logs.append(f"Fallback error: {e}")
+
+    explanation = " | ".join(logs[-8:]) if logs else "OCR не нашел подходящих текстовых боксов"
     return explanation, best_plate, best_confidence
+
+
+def decode_image_from_bytes(image_bytes):
+    np_arr = np.frombuffer(image_bytes, np.uint8)
+    img = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+    if img is None:
+        raise ValueError("Ошибка декодирования")
+    return img
 
 # =================================================================
 # FLASK ROUTES
@@ -268,11 +303,7 @@ def process_data():
     try:
         logger.info("process: received image_data chars=%s", len(base64_img))
         image_bytes = base64.b64decode(base64_img)
-        np_arr = np.frombuffer(image_bytes, np.uint8)
-        img = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
-
-        if img is None:
-            raise ValueError("Ошибка декодирования")
+        img = decode_image_from_bytes(image_bytes)
 
         explanation, plate, conf = process_ocr_pipeline(img)
         logger.info("process: plate=%r conf=%.4f", plate, conf)
@@ -292,6 +323,43 @@ def process_data():
 
     except Exception as e:
         logger.exception("process: failed: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/process_ip_camera', methods=['POST'])
+def process_ip_camera():
+    data = request.get_json(silent=True) or {}
+    camera_url = (data.get('camera_url') or "").strip()
+
+    if not camera_url:
+        return jsonify({"error": "camera_url не указан"}), 400
+
+    try:
+        logger.info("process_ip_camera: fetching frame from %s", camera_url)
+        req = urllib.request.Request(
+            camera_url,
+            headers={"User-Agent": "Mozilla/5.0 OCR-Service"}
+        )
+        with urllib.request.urlopen(req, timeout=6) as response:
+            image_bytes = response.read()
+
+        img = decode_image_from_bytes(image_bytes)
+        explanation, plate, conf = process_ocr_pipeline(img)
+        logger.info("process_ip_camera: plate=%r conf=%.4f", plate, conf)
+
+        preview_b64 = base64.b64encode(image_bytes).decode("utf-8")
+        res = {
+            "plate": plate or "",
+            "confidence_explanation": (
+                f"Найден: {plate} ({conf:.2f}). Лог: {explanation}"
+                if plate else
+                f"Не найдено. Лог: {explanation}"
+            ),
+            "preview_data_url": f"data:image/jpeg;base64,{preview_b64}",
+        }
+        return jsonify(res), 200
+    except Exception as e:
+        logger.exception("process_ip_camera: failed: %s", e)
         return jsonify({"error": str(e)}), 500
 
 @app.route('/health', methods=['GET'])

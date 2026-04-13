@@ -65,6 +65,38 @@
             <div id="loadingIndicatorCapture" class="loader w-5 h-5 border-2 border-white border-solid rounded-full hidden ml-2"></div>
         </button>
     </div>
+
+    <div id="ipCameraSection" class="p-4 bg-gray-50 rounded-xl border border-gray-200 mb-6">
+        <h3 class="text-xl font-semibold text-gray-700 mb-3">Режим: IP-камера (телефон)</h3>
+        <p class="text-sm text-gray-500 mb-3">
+            Укажите URL кадра с телефона (например IP Webcam: <code>http://192.168.1.50:8080/shot.jpg</code>).
+        </p>
+        <input id="ipCameraUrlInput"
+               type="url"
+               placeholder="http://192.168.1.50:8080/shot.jpg"
+               class="w-full px-3 py-2 border border-gray-300 rounded-lg mb-3">
+        <div class="flex gap-2 mb-3">
+            <input id="ipIntervalInput"
+                   type="number"
+                   min="500"
+                   step="100"
+                   value="1200"
+                   class="w-40 px-3 py-2 border border-gray-300 rounded-lg"
+                   title="Интервал опроса в мс">
+            <button id="startStopIpLiveButton"
+                    class="flex-1 px-4 py-3 bg-purple-600 text-white font-semibold rounded-xl shadow-lg hover:bg-purple-700 transition duration-300 disabled:opacity-50 flex items-center justify-center"
+                    disabled>
+                <span id="ipLiveButtonText">Запустить живой режим</span>
+                <div id="loadingIndicatorIpLive" class="loader w-5 h-5 border-2 border-white border-solid rounded-full hidden ml-2"></div>
+            </button>
+        </div>
+        <button id="processIpCameraButton"
+                class="w-full px-4 py-3 bg-violet-600 text-white font-semibold rounded-xl shadow-lg hover:bg-violet-700 transition duration-300 disabled:opacity-50 flex items-center justify-center"
+                disabled>
+            <span id="ipButtonText">Проверить один кадр</span>
+            <div id="loadingIndicatorIpSingle" class="loader w-5 h-5 border-2 border-white border-solid rounded-full hidden ml-2"></div>
+        </button>
+    </div>
     
     <div class="relative flex py-5 items-center">
         <div class="flex-grow border-t border-gray-300"></div>
@@ -134,6 +166,13 @@
     const imageUpload = document.getElementById('imageUpload');
     const processFileButton = document.getElementById('processFileButton');
     const loadingIndicatorFile = document.getElementById('loadingIndicatorFile');
+    const ipCameraUrlInput = document.getElementById('ipCameraUrlInput');
+    const ipIntervalInput = document.getElementById('ipIntervalInput');
+    const startStopIpLiveButton = document.getElementById('startStopIpLiveButton');
+    const ipLiveButtonText = document.getElementById('ipLiveButtonText');
+    const processIpCameraButton = document.getElementById('processIpCameraButton');
+    const loadingIndicatorIpSingle = document.getElementById('loadingIndicatorIpSingle');
+    const loadingIndicatorIpLive = document.getElementById('loadingIndicatorIpLive');
 
 
     function pageDirectoryBaseHref() {
@@ -155,27 +194,34 @@
 
     let OCR_SERVICE_URL;
     let HEALTH_CHECK_URL;
+    let IP_CAMERA_PROCESS_URL;
     const q = API_FROM_QUERY && API_FROM_QUERY.trim();
     const m = API_FROM_META && API_FROM_META.trim();
     if (q) {
         const base = q.replace(/\/$/, '');
         OCR_SERVICE_URL = `${base}/process`;
         HEALTH_CHECK_URL = `${base}/health`;
+        IP_CAMERA_PROCESS_URL = `${base}/process_ip_camera`;
     } else if (m) {
         const base = m.replace(/\/$/, '');
         OCR_SERVICE_URL = `${base}/process`;
         HEALTH_CHECK_URL = `${base}/health`;
+        IP_CAMERA_PROCESS_URL = `${base}/process_ip_camera`;
     } else if (window.location.protocol === 'file:') {
         const base = 'http://127.0.0.1:3020';
         OCR_SERVICE_URL = `${base}/process`;
         HEALTH_CHECK_URL = `${base}/health`;
+        IP_CAMERA_PROCESS_URL = `${base}/process_ip_camera`;
     } else {
         const dir = pageDirectoryBaseHref();
         HEALTH_CHECK_URL = new URL('health', dir).href;
         OCR_SERVICE_URL = new URL('process', dir).href;
+        IP_CAMERA_PROCESS_URL = new URL('process_ip_camera', dir).href;
     }
 
     let currentStream = null;
+    let ipLiveTimer = null;
+    let ipLiveInFlight = false;
 
     function displayError(message) {
         errorContainer.classList.remove('hidden');
@@ -188,9 +234,18 @@
     }
 
     function setLoadingState(isLoading, indicator) {
-        const button = indicator === loadingIndicatorCapture ? captureAndProcessButton : processFileButton;
-        const textSpan = indicator === loadingIndicatorCapture ? document.getElementById('captureButtonText') : document.getElementById('fileButtonText');
-        const defaultText = indicator === loadingIndicatorCapture ? 'Сделать Снимок и Найти Номер' : 'Обработать Загруженный Файл';
+        const button =
+            indicator === loadingIndicatorCapture ? captureAndProcessButton :
+            indicator === loadingIndicatorIpSingle ? processIpCameraButton :
+            processFileButton;
+        const textSpan =
+            indicator === loadingIndicatorCapture ? document.getElementById('captureButtonText') :
+            indicator === loadingIndicatorIpSingle ? document.getElementById('ipButtonText') :
+            document.getElementById('fileButtonText');
+        const defaultText =
+            indicator === loadingIndicatorCapture ? 'Сделать Снимок и Найти Номер' :
+            indicator === loadingIndicatorIpSingle ? 'Проверить один кадр' :
+            'Обработать Загруженный Файл';
 
         button.disabled = isLoading;
         indicator.classList.toggle('hidden', !isLoading);
@@ -329,10 +384,109 @@
 
         processImage(base64Image, loadingIndicatorCapture);
     }
+
+    async function processIpCameraFrame() {
+        const cameraUrl = ipCameraUrlInput.value.trim();
+        if (!cameraUrl) {
+            displayError('Укажите URL IP-камеры.');
+            return;
+        }
+
+        clearError();
+        setLoadingState(true, loadingIndicatorIpSingle);
+        resultsContainer.classList.add('hidden');
+        noPlateWarning.classList.add('hidden');
+
+        try {
+            const isServiceReady = await checkServiceStatus();
+            if (!isServiceReady) {
+                displayError("Локальный сервис OCR не запущен. Пожалуйста, запустите Docker-контейнер.");
+                return;
+            }
+
+            const response = await fetch(IP_CAMERA_PROCESS_URL, {
+                method: 'POST',
+                mode: 'cors',
+                cache: 'no-store',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ camera_url: cameraUrl })
+            });
+            if (!response.ok) {
+                const errBody = await response.json().catch(() => ({}));
+                throw new Error(errBody.error || `Ошибка IP-камеры: ${response.status}`);
+            }
+
+            const result = await response.json();
+            plateOutput.textContent = (result.plate || '').toUpperCase() || '—';
+            explanationOutput.textContent = result.confidence_explanation || 'Нет дополнительного объяснения.';
+            imagePreview.src = result.preview_data_url || '';
+            if (result.plate) {
+                noPlateWarning.classList.add('hidden');
+            } else {
+                noPlateWarning.classList.remove('hidden');
+            }
+            resultsContainer.classList.remove('hidden');
+        } catch (err) {
+            console.error("IP camera processing failed:", err);
+            displayError(`Не удалось получить кадр с IP-камеры: ${err.message}. Проверьте URL и сеть.`);
+        } finally {
+            setLoadingState(false, loadingIndicatorIpSingle);
+        }
+    }
+
+    async function tickIpLive() {
+        if (ipLiveInFlight) return;
+        ipLiveInFlight = true;
+        try {
+            await processIpCameraFrame();
+        } finally {
+            ipLiveInFlight = false;
+        }
+    }
+
+    function stopIpLiveMode() {
+        if (ipLiveTimer) {
+            clearInterval(ipLiveTimer);
+            ipLiveTimer = null;
+        }
+        ipLiveButtonText.textContent = 'Запустить живой режим';
+        loadingIndicatorIpLive.classList.add('hidden');
+    }
+
+    function startStopIpLiveMode() {
+        const cameraUrl = ipCameraUrlInput.value.trim();
+        if (!cameraUrl) {
+            displayError('Укажите URL IP-камеры.');
+            return;
+        }
+
+        if (ipLiveTimer) {
+            stopIpLiveMode();
+            return;
+        }
+
+        const intervalMs = Math.max(500, Number(ipIntervalInput.value) || 1200);
+        ipIntervalInput.value = String(intervalMs);
+        ipLiveButtonText.textContent = 'Остановить живой режим';
+        loadingIndicatorIpLive.classList.remove('hidden');
+        tickIpLive();
+        ipLiveTimer = setInterval(tickIpLive, intervalMs);
+    }
     
     // --- EVENT LISTENERS ---
     startCameraButton.addEventListener('click', startVideoStream);
     captureAndProcessButton.addEventListener('click', captureFrame);
+    processIpCameraButton.addEventListener('click', processIpCameraFrame);
+    startStopIpLiveButton.addEventListener('click', startStopIpLiveMode);
+
+    ipCameraUrlInput.addEventListener('input', () => {
+        const hasUrl = !!ipCameraUrlInput.value.trim();
+        processIpCameraButton.disabled = !hasUrl;
+        startStopIpLiveButton.disabled = !hasUrl;
+        if (!hasUrl) {
+            stopIpLiveMode();
+        }
+    });
 
     imageUpload.addEventListener('change', function(event) {
         processFileButton.disabled = true;
