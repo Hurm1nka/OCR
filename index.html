@@ -97,6 +97,27 @@
             <div id="loadingIndicatorIpSingle" class="loader w-5 h-5 border-2 border-white border-solid rounded-full hidden ml-2"></div>
         </button>
     </div>
+
+    <div id="localBackendCameraSection" class="p-4 bg-gray-50 rounded-xl border border-gray-200 mb-6">
+        <h3 class="text-xl font-semibold text-gray-700 mb-3">Режим: Локальная камера ПК (через backend)</h3>
+        <p class="text-sm text-gray-500 mb-3">
+            Если браузер не дает доступ к камере, можно снять кадр на стороне сервиса (OpenCV).
+        </p>
+        <div class="flex gap-2 mb-3">
+            <input id="localCameraIndexInput"
+                   type="number"
+                   min="0"
+                   step="1"
+                   value="0"
+                   class="w-40 px-3 py-2 border border-gray-300 rounded-lg"
+                   title="Индекс камеры (обычно 0)">
+            <button id="processLocalCameraButton"
+                    class="flex-1 px-4 py-3 bg-emerald-600 text-white font-semibold rounded-xl shadow-lg hover:bg-emerald-700 transition duration-300 disabled:opacity-50 flex items-center justify-center">
+                <span id="localCameraButtonText">Снять кадр с локальной камеры</span>
+                <div id="loadingIndicatorLocalCamera" class="loader w-5 h-5 border-2 border-white border-solid rounded-full hidden ml-2"></div>
+            </button>
+        </div>
+    </div>
     
     <div class="relative flex py-5 items-center">
         <div class="flex-grow border-t border-gray-300"></div>
@@ -173,6 +194,9 @@
     const processIpCameraButton = document.getElementById('processIpCameraButton');
     const loadingIndicatorIpSingle = document.getElementById('loadingIndicatorIpSingle');
     const loadingIndicatorIpLive = document.getElementById('loadingIndicatorIpLive');
+    const localCameraIndexInput = document.getElementById('localCameraIndexInput');
+    const processLocalCameraButton = document.getElementById('processLocalCameraButton');
+    const loadingIndicatorLocalCamera = document.getElementById('loadingIndicatorLocalCamera');
 
 
     function pageDirectoryBaseHref() {
@@ -195,6 +219,7 @@
     let OCR_SERVICE_URL;
     let HEALTH_CHECK_URL;
     let IP_CAMERA_PROCESS_URL;
+    let LOCAL_CAMERA_PROCESS_URL;
     const q = API_FROM_QUERY && API_FROM_QUERY.trim();
     const m = API_FROM_META && API_FROM_META.trim();
     if (q) {
@@ -202,21 +227,25 @@
         OCR_SERVICE_URL = `${base}/process`;
         HEALTH_CHECK_URL = `${base}/health`;
         IP_CAMERA_PROCESS_URL = `${base}/process_ip_camera`;
+        LOCAL_CAMERA_PROCESS_URL = `${base}/process_local_camera`;
     } else if (m) {
         const base = m.replace(/\/$/, '');
         OCR_SERVICE_URL = `${base}/process`;
         HEALTH_CHECK_URL = `${base}/health`;
         IP_CAMERA_PROCESS_URL = `${base}/process_ip_camera`;
+        LOCAL_CAMERA_PROCESS_URL = `${base}/process_local_camera`;
     } else if (window.location.protocol === 'file:') {
         const base = 'http://127.0.0.1:3020';
         OCR_SERVICE_URL = `${base}/process`;
         HEALTH_CHECK_URL = `${base}/health`;
         IP_CAMERA_PROCESS_URL = `${base}/process_ip_camera`;
+        LOCAL_CAMERA_PROCESS_URL = `${base}/process_local_camera`;
     } else {
         const dir = pageDirectoryBaseHref();
         HEALTH_CHECK_URL = new URL('health', dir).href;
         OCR_SERVICE_URL = new URL('process', dir).href;
         IP_CAMERA_PROCESS_URL = new URL('process_ip_camera', dir).href;
+        LOCAL_CAMERA_PROCESS_URL = new URL('process_local_camera', dir).href;
     }
 
     let currentStream = null;
@@ -237,14 +266,17 @@
         const button =
             indicator === loadingIndicatorCapture ? captureAndProcessButton :
             indicator === loadingIndicatorIpSingle ? processIpCameraButton :
+            indicator === loadingIndicatorLocalCamera ? processLocalCameraButton :
             processFileButton;
         const textSpan =
             indicator === loadingIndicatorCapture ? document.getElementById('captureButtonText') :
             indicator === loadingIndicatorIpSingle ? document.getElementById('ipButtonText') :
+            indicator === loadingIndicatorLocalCamera ? document.getElementById('localCameraButtonText') :
             document.getElementById('fileButtonText');
         const defaultText =
             indicator === loadingIndicatorCapture ? 'Сделать Снимок и Найти Номер' :
             indicator === loadingIndicatorIpSingle ? 'Проверить один кадр' :
+            indicator === loadingIndicatorLocalCamera ? 'Снять кадр с локальной камеры' :
             'Обработать Загруженный Файл';
 
         button.disabled = isLoading;
@@ -434,6 +466,52 @@
         }
     }
 
+    async function processLocalCameraFrame() {
+        clearError();
+        setLoadingState(true, loadingIndicatorLocalCamera);
+        resultsContainer.classList.add('hidden');
+        noPlateWarning.classList.add('hidden');
+
+        try {
+            const isServiceReady = await checkServiceStatus();
+            if (!isServiceReady) {
+                displayError("Локальный сервис OCR не запущен. Пожалуйста, запустите Docker-контейнер.");
+                return;
+            }
+
+            const cameraIndex = Math.max(0, Number(localCameraIndexInput.value) || 0);
+            localCameraIndexInput.value = String(cameraIndex);
+
+            const response = await fetch(LOCAL_CAMERA_PROCESS_URL, {
+                method: 'POST',
+                mode: 'cors',
+                cache: 'no-store',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ camera_index: cameraIndex })
+            });
+            if (!response.ok) {
+                const errBody = await response.json().catch(() => ({}));
+                throw new Error(errBody.error || `Ошибка локальной камеры: ${response.status}`);
+            }
+
+            const result = await response.json();
+            plateOutput.textContent = (result.plate || '').toUpperCase() || '—';
+            explanationOutput.textContent = result.confidence_explanation || 'Нет дополнительного объяснения.';
+            imagePreview.src = result.preview_data_url || '';
+            if (result.plate) {
+                noPlateWarning.classList.add('hidden');
+            } else {
+                noPlateWarning.classList.remove('hidden');
+            }
+            resultsContainer.classList.remove('hidden');
+        } catch (err) {
+            console.error("Local backend camera processing failed:", err);
+            displayError(`Не удалось получить кадр с локальной камеры: ${err.message}.`);
+        } finally {
+            setLoadingState(false, loadingIndicatorLocalCamera);
+        }
+    }
+
     async function tickIpLive() {
         if (ipLiveInFlight) return;
         ipLiveInFlight = true;
@@ -477,6 +555,7 @@
     startCameraButton.addEventListener('click', startVideoStream);
     captureAndProcessButton.addEventListener('click', captureFrame);
     processIpCameraButton.addEventListener('click', processIpCameraFrame);
+    processLocalCameraButton.addEventListener('click', processLocalCameraFrame);
     startStopIpLiveButton.addEventListener('click', startStopIpLiveMode);
 
     ipCameraUrlInput.addEventListener('input', () => {

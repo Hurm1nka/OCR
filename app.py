@@ -7,6 +7,7 @@ import base64
 import urllib.request
 from paddleocr import PaddleOCR
 import logging
+from logging.handlers import RotatingFileHandler
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS 
 
@@ -17,12 +18,19 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 app = Flask(__name__)
 CORS(app) 
 
+LOG_PATH = os.path.join(BASE_DIR, "ocr_service.log")
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    handlers=[
+        logging.StreamHandler(),
+        RotatingFileHandler(LOG_PATH, maxBytes=2_000_000, backupCount=3, encoding="utf-8"),
+    ],
+    force=True,
 )
 logger = logging.getLogger("ocr-service")
 logging.getLogger("ppocr").setLevel(logging.ERROR)
+logger.info("Service logging initialized. Log file: %s", LOG_PATH)
 
 @app.before_request
 def log_request():
@@ -60,6 +68,7 @@ VALID_DIGITS = "0123456789"
 RUSSIAN_PLATE_CHARS = VALID_LETTERS + VALID_DIGITS
 
 PLATE_REGEX = re.compile(r'^[АВЕКМНОРСТУХ]\d{3}[АВЕКМНОРСТУХ]{2}$')
+PLATE_WITH_REGION_REGEX = re.compile(r'^([АВЕКМНОРСТУХ]\d{3}[АВЕКМНОРСТУХ]{2})(\d{2,3})?$')
 
 DIGIT_TO_LETTER = {
     '0': 'О', '4': 'А', '8': 'В', '3': 'З',
@@ -125,6 +134,39 @@ def try_fix_plate(text):
             return fixed_str
 
     return None
+
+
+def try_extract_plate_from_text(text):
+    """
+    Возвращает номер формата LDDDLL и, при наличии, регион (2-3 цифры).
+    """
+    if len(text) < 6:
+        return None, None
+
+    for i in range(len(text) - 5):
+        max_len = min(9, len(text) - i)  # 6 + регион до 3 цифр
+        window = text[i : i + max_len]
+        fixed_base = try_fix_plate(window[:6])
+        if not fixed_base:
+            continue
+
+        region = ""
+        for ch in window[6:]:
+            if ch in VALID_DIGITS:
+                region += ch
+            elif ch in LETTER_TO_DIGIT:
+                region += LETTER_TO_DIGIT[ch]
+            else:
+                break
+
+        if len(region) not in (0, 2, 3):
+            region = ""
+
+        combined = fixed_base + region
+        if PLATE_WITH_REGION_REGEX.match(combined):
+            return fixed_base, region
+
+    return None, None
 
 # =================================================================
 # IMAGE PROCESSING
@@ -199,11 +241,12 @@ def generate_image_variants(img):
 
 def process_ocr_pipeline(image_array):
     if ocr_reader is None:
-        return "Модель не готова", None, 0.0
+        return "Модель не готова", None, "", 0.0
 
     variants = generate_image_variants(image_array)
 
     best_plate = None
+    best_region = ""
     best_confidence = 0.0
     logs = []
 
@@ -237,14 +280,15 @@ def process_ocr_pipeline(image_array):
                     continue
 
                 normalized = normalize_chars(raw_text)
-                fixed_plate = try_fix_plate(normalized)
-
-                log_entry = f"Var{i}: '{raw_text}' -> '{normalized}' -> '{fixed_plate}' ({confidence:.2f})"
+                fixed_plate, region = try_extract_plate_from_text(normalized)
+                plate_for_log = (fixed_plate + region) if fixed_plate else None
+                log_entry = f"Var{i}: '{raw_text}' -> '{normalized}' -> '{plate_for_log}' ({confidence:.2f})"
                 logs.append(log_entry)
 
                 if fixed_plate and PLATE_REGEX.match(fixed_plate):
                     if confidence > best_confidence:
                         best_plate = fixed_plate
+                        best_region = region
                         best_confidence = confidence
 
             if best_plate and best_confidence > 0.9:
@@ -260,16 +304,18 @@ def process_ocr_pipeline(image_array):
             if fallback_result and fallback_result[0]:
                 merged = "".join([line[1][0] for line in fallback_result[0]])
                 normalized = normalize_chars(merged)
-                fixed_plate = try_fix_plate(normalized)
-                logs.append(f"Fallback merged: '{merged}' -> '{normalized}' -> '{fixed_plate}'")
+                fixed_plate, region = try_extract_plate_from_text(normalized)
+                plate_for_log = (fixed_plate + region) if fixed_plate else None
+                logs.append(f"Fallback merged: '{merged}' -> '{normalized}' -> '{plate_for_log}'")
                 if fixed_plate and PLATE_REGEX.match(fixed_plate):
                     best_plate = fixed_plate
+                    best_region = region
                     best_confidence = 0.5
         except Exception as e:
             logs.append(f"Fallback error: {e}")
 
     explanation = " | ".join(logs[-8:]) if logs else "OCR не нашел подходящих текстовых боксов"
-    return explanation, best_plate, best_confidence
+    return explanation, best_plate, best_region, best_confidence
 
 
 def decode_image_from_bytes(image_bytes):
@@ -305,17 +351,22 @@ def process_data():
         image_bytes = base64.b64decode(base64_img)
         img = decode_image_from_bytes(image_bytes)
 
-        explanation, plate, conf = process_ocr_pipeline(img)
-        logger.info("process: plate=%r conf=%.4f", plate, conf)
+        explanation, plate, region, conf = process_ocr_pipeline(img)
+        logger.info("process: plate=%r region=%r conf=%.4f", plate, region, conf)
+        full_plate = f"{plate}{region}" if plate else ""
 
         if plate:
             res = {
-                "plate": plate,
-                "confidence_explanation": f"Найден: {plate} ({conf:.2f}). Лог: {explanation}"
+                "plate": full_plate,
+                "plate_base": plate,
+                "region": region,
+                "confidence_explanation": f"Найден: {full_plate} ({conf:.2f}). Лог: {explanation}"
             }
         else:
             res = {
                 "plate": "",
+                "plate_base": "",
+                "region": "",
                 "confidence_explanation": f"Не найдено. Лог: {explanation}"
             }
 
@@ -344,14 +395,17 @@ def process_ip_camera():
             image_bytes = response.read()
 
         img = decode_image_from_bytes(image_bytes)
-        explanation, plate, conf = process_ocr_pipeline(img)
-        logger.info("process_ip_camera: plate=%r conf=%.4f", plate, conf)
+        explanation, plate, region, conf = process_ocr_pipeline(img)
+        logger.info("process_ip_camera: plate=%r region=%r conf=%.4f", plate, region, conf)
+        full_plate = f"{plate}{region}" if plate else ""
 
         preview_b64 = base64.b64encode(image_bytes).decode("utf-8")
         res = {
-            "plate": plate or "",
+            "plate": full_plate,
+            "plate_base": plate or "",
+            "region": region or "",
             "confidence_explanation": (
-                f"Найден: {plate} ({conf:.2f}). Лог: {explanation}"
+                f"Найден: {full_plate} ({conf:.2f}). Лог: {explanation}"
                 if plate else
                 f"Не найдено. Лог: {explanation}"
             ),
@@ -361,6 +415,51 @@ def process_ip_camera():
     except Exception as e:
         logger.exception("process_ip_camera: failed: %s", e)
         return jsonify({"error": str(e)}), 500
+
+
+@app.route('/process_local_camera', methods=['POST'])
+def process_local_camera():
+    data = request.get_json(silent=True) or {}
+    camera_index = int(data.get('camera_index', 0))
+
+    logger.info("process_local_camera: opening camera index=%s", camera_index)
+    cap = cv2.VideoCapture(camera_index, cv2.CAP_DSHOW)
+    if not cap.isOpened():
+        logger.error("process_local_camera: cannot open camera index=%s", camera_index)
+        return jsonify({"error": f"Не удалось открыть локальную камеру index={camera_index}"}), 500
+
+    try:
+        ok, frame = cap.read()
+        if not ok or frame is None:
+            logger.error("process_local_camera: failed to read frame index=%s", camera_index)
+            return jsonify({"error": "Не удалось получить кадр с локальной камеры"}), 500
+
+        explanation, plate, region, conf = process_ocr_pipeline(frame)
+        full_plate = f"{plate}{region}" if plate else ""
+        logger.info("process_local_camera: plate=%r region=%r conf=%.4f", plate, region, conf)
+
+        ok_jpg, jpg_buf = cv2.imencode(".jpg", frame)
+        preview_data_url = ""
+        if ok_jpg:
+            preview_b64 = base64.b64encode(jpg_buf.tobytes()).decode("utf-8")
+            preview_data_url = f"data:image/jpeg;base64,{preview_b64}"
+
+        return jsonify({
+            "plate": full_plate,
+            "plate_base": plate or "",
+            "region": region or "",
+            "confidence_explanation": (
+                f"Найден: {full_plate} ({conf:.2f}). Лог: {explanation}"
+                if plate else
+                f"Не найдено. Лог: {explanation}"
+            ),
+            "preview_data_url": preview_data_url,
+        }), 200
+    except Exception as e:
+        logger.exception("process_local_camera: failed: %s", e)
+        return jsonify({"error": str(e)}), 500
+    finally:
+        cap.release()
 
 @app.route('/health', methods=['GET'])
 def health():
