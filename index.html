@@ -68,9 +68,15 @@
 
     <div id="ipCameraSection" class="p-4 bg-gray-50 rounded-xl border border-gray-200 mb-6">
         <h3 class="text-xl font-semibold text-gray-700 mb-3">Режим: IP-камера (телефон)</h3>
+        <div class="text-sm text-amber-900 bg-amber-50 border border-amber-200 rounded-lg p-3 mb-3">
+            <strong class="font-semibold">Разные сети (ПК и телефон в разных LAN / OCR на VPS):</strong>
+            адрес вида <code>192.168…</code> с сервера или с другой «чужой» сети <strong>не открыть</strong> — так устроен интернет.
+            Нужен либо один Wi‑Fi с телефоном, либо <strong>публичный URL</strong> к кадру (если приложение даёт ссылку через облако),
+            либо VPN/туннель между сетями. Проще: сфотографировать номер в блоке «камера в браузере» или «загрузка файла».
+        </div>
         <p class="text-sm text-gray-500 mb-3">
-            Снимок по HTTP: <code>http://192.168.1.50:8080/shot.jpg</code> (IP Webcam и аналоги). Без пробелов между IP и портом.
-            Поток <code>rtsp://…</code> тоже можно: сервер снимет один кадр через OpenCV (в Docker нужен доступ к камере по сети).
+            Если ПК и телефон в <strong>одной</strong> LAN: HTTP-снимок <code>http://192.168.1.50:8080/shot.jpg</code> (IP Webcam и аналоги), без пробелов между IP и портом.
+            Поток <code>rtsp://…</code> — сервер снимет один кадр через OpenCV (хост должен быть достижен <strong>с той машины, где запущен Docker</strong>).
         </p>
         <input id="ipCameraUrlInput"
                type="url"
