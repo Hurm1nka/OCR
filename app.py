@@ -116,14 +116,7 @@ def try_fix_plate(text):
                     candidate[pos] = LETTER_TO_DIGIT[char]
 
         fixed_str = "".join(candidate)
-
-        if (fixed_str[0] in VALID_LETTERS and
-            fixed_str[1] in VALID_DIGITS and
-            fixed_str[2] in VALID_DIGITS and
-            fixed_str[3] in VALID_DIGITS and
-            fixed_str[4] in VALID_LETTERS and
-            fixed_str[5] in VALID_LETTERS):
-            
+        if PLATE_REGEX.match(fixed_str):
             return fixed_str
 
     return None
