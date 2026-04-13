@@ -315,6 +315,64 @@ def decode_image_from_bytes(image_bytes):
         raise ValueError("Ошибка декодирования")
     return img
 
+
+def normalize_camera_url(url):
+    """
+    Убирает типичные опечатки: пробелы между хостом и портом
+    (например «rtsp://192.168.1.5  8556 /path» → «rtsp://192.168.1.5:8556/path»).
+    """
+    url = (url or "").strip()
+    if not url:
+        return url
+    url = re.sub(
+        r"(?i)((?:rtsp|rtsps|https?)://[^\s/]+)\s+(\d{2,5})",
+        r"\1:\2",
+        url,
+        count=1,
+    )
+    url = re.sub(r"\s+", "", url)
+    return url
+
+
+def fetch_image_for_ip_camera(camera_url):
+    """
+    HTTP(S): скачивает байты картинки (как snapshot IP Webcam: /shot.jpg).
+    RTSP: один кадр через OpenCV+FFmpeg (urllib не поддерживает rtsp://).
+    Возвращает (img_bgr, preview_jpeg_bytes).
+    """
+    u = camera_url.strip()
+    low = u.lower()
+    if low.startswith(("rtsp://", "rtsps://")):
+        cap = cv2.VideoCapture(u, cv2.CAP_FFMPEG)
+        if not cap.isOpened():
+            raise RuntimeError(
+                "Не удалось открыть RTSP. Проверьте URL (логин/пароль в строке при необходимости), "
+                "порт и сеть. Для снимка с телефона (IP Webcam) обычно нужен HTTP: "
+                "http://IP:8080/shot.jpg — не rtsp."
+            )
+        try:
+            ok, frame = cap.read()
+        finally:
+            cap.release()
+        if not ok or frame is None:
+            raise RuntimeError("RTSP: пустой кадр (поток ещё не готов или нет видео).")
+        ok_jpg, buf = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
+        if not ok_jpg:
+            raise RuntimeError("Не удалось закодировать кадр в JPEG.")
+        return frame, buf.tobytes()
+
+    req = urllib.request.Request(
+        u,
+        headers={"User-Agent": "Mozilla/5.0 OCR-Service"},
+    )
+    with urllib.request.urlopen(req, timeout=12) as response:
+        image_bytes = response.read()
+    img = decode_image_from_bytes(image_bytes)
+    ok_jpg, buf = cv2.imencode(".jpg", img, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
+    preview = buf.tobytes() if ok_jpg else image_bytes
+    return img, preview
+
+
 # =================================================================
 # FLASK ROUTES
 # =================================================================
@@ -374,26 +432,19 @@ def process_data():
 @app.route('/process_ip_camera', methods=['POST'])
 def process_ip_camera():
     data = request.get_json(silent=True) or {}
-    camera_url = (data.get('camera_url') or "").strip()
+    camera_url = normalize_camera_url((data.get("camera_url") or "").strip())
 
     if not camera_url:
         return jsonify({"error": "camera_url не указан"}), 400
 
     try:
         logger.info("process_ip_camera: fetching frame from %s", camera_url)
-        req = urllib.request.Request(
-            camera_url,
-            headers={"User-Agent": "Mozilla/5.0 OCR-Service"}
-        )
-        with urllib.request.urlopen(req, timeout=6) as response:
-            image_bytes = response.read()
-
-        img = decode_image_from_bytes(image_bytes)
+        img, preview_bytes = fetch_image_for_ip_camera(camera_url)
         model_explanation, ocr_log, plate, region, conf = process_ocr_pipeline(img)
         logger.info("process_ip_camera: plate=%r region=%r conf=%.4f", plate, region, conf)
         full_plate = f"{plate}{region}" if plate else ""
 
-        preview_b64 = base64.b64encode(image_bytes).decode("utf-8")
+        preview_b64 = base64.b64encode(preview_bytes).decode("utf-8")
         res = {
             "plate": full_plate,
             "plate_base": plate or "",
