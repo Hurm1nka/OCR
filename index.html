@@ -64,9 +64,19 @@
             <span id="captureButtonText">Сделать Снимок и Найти Номер</span>
             <div id="loadingIndicatorCapture" class="loader w-5 h-5 border-2 border-white border-solid rounded-full hidden ml-2"></div>
         </button>
+
+        <div class="mt-4 rounded-lg border border-gray-200 bg-white p-3">
+            <label class="flex items-start gap-3 cursor-pointer">
+                <input type="checkbox" id="autoCaptureDirectCheckbox" class="mt-1 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500">
+                <span class="text-sm text-gray-700">
+                    <span class="font-semibold text-gray-800">Автосъём каждые 3 с</span>
+                    — пока камера включена, кадр снимается и отправляется на распознавание каждые 3 секунды (как бывший «живой» режим IP-камеры, но через камеру браузера).
+                </span>
+            </label>
+        </div>
     </div>
 
-    <div id="ipCameraSection" class="p-4 bg-gray-50 rounded-xl border border-gray-200 mb-6">
+    <div id="ipCameraSection" class="hidden p-4 bg-gray-50 rounded-xl border border-gray-200 mb-6" aria-hidden="true">
         <h3 class="text-xl font-semibold text-gray-700 mb-3">Режим: IP-камера (телефон)</h3>
         <div class="text-sm text-amber-900 bg-amber-50 border border-amber-200 rounded-lg p-3 mb-3">
             <strong class="font-semibold">Разные сети (ПК и телефон в разных LAN / OCR на VPS):</strong>
@@ -215,6 +225,7 @@
     const startStopText = document.getElementById('startStopText');
     const captureAndProcessButton = document.getElementById('captureAndProcessButton');
     const loadingIndicatorCapture = document.getElementById('loadingIndicatorCapture');
+    const autoCaptureDirectCheckbox = document.getElementById('autoCaptureDirectCheckbox');
 
     const imageUpload = document.getElementById('imageUpload');
     const processFileButton = document.getElementById('processFileButton');
@@ -288,6 +299,8 @@
     let currentStream = null;
     let ipLiveTimer = null;
     let ipLiveInFlight = false;
+    let autoCaptureDirectInterval = null;
+    let directAutoCaptureInFlight = false;
 
     function displayError(message) {
         errorContainer.classList.remove('hidden');
@@ -404,9 +417,37 @@
         }
     }
 
+    function stopDirectAutoCapture() {
+        if (autoCaptureDirectInterval) {
+            clearInterval(autoCaptureDirectInterval);
+            autoCaptureDirectInterval = null;
+        }
+    }
+
+    async function tickDirectAutoCapture() {
+        if (!autoCaptureDirectCheckbox?.checked || !currentStream) return;
+        if (directAutoCaptureInFlight) return;
+        if (!videoElement.videoWidth || videoElement.paused || videoElement.ended) return;
+        directAutoCaptureInFlight = true;
+        try {
+            await captureFrame();
+        } finally {
+            directAutoCaptureInFlight = false;
+        }
+    }
+
+    function startDirectAutoCaptureInterval() {
+        stopDirectAutoCapture();
+        if (!autoCaptureDirectCheckbox?.checked || !currentStream) return;
+        void tickDirectAutoCapture();
+        autoCaptureDirectInterval = setInterval(() => void tickDirectAutoCapture(), 3000);
+    }
+
     async function startVideoStream() {
         clearError();
         if (currentStream) {
+            stopDirectAutoCapture();
+            if (autoCaptureDirectCheckbox) autoCaptureDirectCheckbox.checked = false;
             currentStream.getTracks().forEach(track => track.stop());
             currentStream = null;
             startStopText.textContent = 'Запустить Камеру';
@@ -428,6 +469,9 @@
             videoElement.classList.remove('hidden');
             startStopText.textContent = 'Остановить Камеру';
             captureAndProcessButton.disabled = false;
+            if (autoCaptureDirectCheckbox?.checked) {
+                startDirectAutoCaptureInterval();
+            }
         } catch (err) {
             console.error("Error accessing camera: ", err);
             displayError("Не удалось получить доступ к камере. Убедитесь, что разрешение предоставлено.");
@@ -438,11 +482,14 @@
     function captureFrame() {
         if (!currentStream || videoElement.paused || videoElement.ended) {
             displayError("Поток камеры неактивен.");
-            return;
+            return Promise.resolve();
         }
 
         const width = videoElement.videoWidth;
         const height = videoElement.videoHeight;
+        if (!width || !height) {
+            return Promise.resolve();
+        }
         canvasElement.width = width;
         canvasElement.height = height;
 
@@ -455,7 +502,7 @@
         
         imagePreview.src = dataURL;
 
-        processImage(base64Image, loadingIndicatorCapture);
+        return processImage(base64Image, loadingIndicatorCapture);
     }
 
     async function processIpCameraFrame() {
@@ -596,7 +643,21 @@
     
     // --- EVENT LISTENERS ---
     startCameraButton.addEventListener('click', startVideoStream);
-    captureAndProcessButton.addEventListener('click', captureFrame);
+    captureAndProcessButton.addEventListener('click', () => void captureFrame());
+    if (autoCaptureDirectCheckbox) {
+        autoCaptureDirectCheckbox.addEventListener('change', () => {
+            if (autoCaptureDirectCheckbox.checked) {
+                if (!currentStream) {
+                    displayError('Сначала нажмите «Запустить камеру», затем включите автосъём.');
+                    autoCaptureDirectCheckbox.checked = false;
+                    return;
+                }
+                startDirectAutoCaptureInterval();
+            } else {
+                stopDirectAutoCapture();
+            }
+        });
+    }
     processIpCameraButton.addEventListener('click', processIpCameraFrame);
     processLocalCameraButton.addEventListener('click', processLocalCameraFrame);
     startStopIpLiveButton.addEventListener('click', startStopIpLiveMode);
