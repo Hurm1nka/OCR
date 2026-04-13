@@ -31,9 +31,17 @@ WORKDIR /app
 # Копируем файлы приложения
 COPY app.py .
 COPY index.html .
+COPY gunicorn.conf.py .
+
+# Ограничение потоков BLAS/OpenMP снижает риск OOM и «штормов» CPU в контейнере
+ENV OMP_NUM_THREADS=2 \
+    MKL_NUM_THREADS=2 \
+    OPENBLAS_NUM_THREADS=1 \
+    MALLOC_ARENA_MAX=2 \
+    PYTHONUNBUFFERED=1
 
 # Открываем порт для flask (бэкенд)
 EXPOSE 5000
 
-# Команда для запуска веб-сервера Gunicorn (логи запросов в stdout)
-CMD ["gunicorn", "--access-logfile", "-", "--error-logfile", "-", "--bind", "0.0.0.0:5000", "app:app"]
+# Gunicorn: см. gunicorn.conf.py (таймауты для OCR, один воркер)
+CMD ["gunicorn", "-c", "gunicorn.conf.py", "app:app"]

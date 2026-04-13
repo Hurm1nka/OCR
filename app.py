@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import os
+import sys
 import re
 import cv2
 import numpy as np
@@ -421,7 +422,10 @@ def process_local_camera():
     camera_index = int(data.get('camera_index', 0))
 
     logger.info("process_local_camera: opening camera index=%s", camera_index)
-    cap = cv2.VideoCapture(camera_index, cv2.CAP_DSHOW)
+    if sys.platform == "win32":
+        cap = cv2.VideoCapture(camera_index, cv2.CAP_DSHOW)
+    else:
+        cap = cv2.VideoCapture(camera_index)
     if not cap.isOpened():
         logger.error("process_local_camera: cannot open camera index=%s", camera_index)
         return jsonify({"error": f"Не удалось открыть локальную камеру index={camera_index}"}), 500
