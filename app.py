@@ -2,10 +2,13 @@
 import os
 import sys
 import re
+import time
+import ipaddress
 import cv2
 import numpy as np
 import base64
 import urllib.request
+from urllib.parse import urlparse
 from paddleocr import PaddleOCR
 import logging
 from flask import Flask, request, jsonify, send_from_directory
@@ -334,6 +337,25 @@ def normalize_camera_url(url):
     return url
 
 
+def _hint_if_camera_host_unreachable_from_internet(camera_url):
+    """Частная сеть (192.168.x и т.д.) с удалённого VPS не маршрутизируется."""
+    host = urlparse(camera_url).hostname
+    if not host:
+        return ""
+    try:
+        ip = ipaddress.ip_address(host)
+        if ip.is_private or ip.is_link_local:
+            return (
+                " Камера по адресу в частной сети (192.168.x.x, 10.x, 172.16–31.x) с **удалённого сервера** "
+                "(VPS в интернете) недоступна: пакеты туда не дойдут. Запускайте OCR **на ПК в той же LAN**, "
+                "что и камера, или пробросьте поток наружу (VPN, FRP, облачный relay). "
+                "Для IP Webcam чаще используйте **HTTP**: http://IP:8080/shot.jpg"
+            )
+    except ValueError:
+        pass
+    return ""
+
+
 def fetch_image_for_ip_camera(camera_url):
     """
     HTTP(S): скачивает байты картинки (как snapshot IP Webcam: /shot.jpg).
@@ -343,19 +365,36 @@ def fetch_image_for_ip_camera(camera_url):
     u = camera_url.strip()
     low = u.lower()
     if low.startswith(("rtsp://", "rtsps://")):
+        # TCP чаще проходит NAT/фаерволы, чем UDP по умолчанию у RTSP.
+        os.environ.setdefault("OPENCV_FFMPEG_CAPTURE_OPTIONS", "rtsp_transport;tcp")
+
         cap = cv2.VideoCapture(u, cv2.CAP_FFMPEG)
         if not cap.isOpened():
+            hint = _hint_if_camera_host_unreachable_from_internet(u)
             raise RuntimeError(
-                "Не удалось открыть RTSP. Проверьте URL (логин/пароль в строке при необходимости), "
-                "порт и сеть. Для снимка с телефона (IP Webcam) обычно нужен HTTP: "
-                "http://IP:8080/shot.jpg — не rtsp."
+                "Не удалось открыть RTSP (OpenCV/FFmpeg). Проверьте URL, логин/пароль, порт и что поток "
+                "существует. Попробуйте открыть тот же URL в VLC."
+                + hint
+                + " Для снимка с телефона (IP Webcam) обычно нужен HTTP: http://IP:8080/shot.jpg"
             )
         try:
-            ok, frame = cap.read()
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        except Exception:
+            pass
+        frame = None
+        try:
+            for _ in range(20):
+                ok, frame = cap.read()
+                if ok and frame is not None and getattr(frame, "size", 0) > 0:
+                    break
+                time.sleep(0.08)
         finally:
             cap.release()
-        if not ok or frame is None:
-            raise RuntimeError("RTSP: пустой кадр (поток ещё не готов или нет видео).")
+        if frame is None or not getattr(frame, "size", 0):
+            raise RuntimeError(
+                "RTSP: не удалось прочитать кадр (поток пуст, неверный путь или кодек)."
+                + _hint_if_camera_host_unreachable_from_internet(u)
+            )
         ok_jpg, buf = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
         if not ok_jpg:
             raise RuntimeError("Не удалось закодировать кадр в JPEG.")
