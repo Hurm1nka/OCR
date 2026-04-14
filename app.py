@@ -85,6 +85,30 @@ LATIN_TO_CYRILLIC = {
     'O': 'О', 'P': 'Р', 'C': 'С', 'T': 'Т', 'X': 'Х', 'Y': 'У'
 }
 
+AMBIGUOUS_TO_DIGITS = {
+    'О': ['0'],
+    'O': ['0'],
+    'Q': ['0'],
+    'D': ['0'],
+    'I': ['1'],
+    'L': ['1'],
+    'Z': ['2'],
+    'Б': ['6', '8'],
+    'В': ['8'],
+    'S': ['5'],
+    'G': ['6'],
+    'Э': ['9', '3'],
+    'З': ['3'],
+    'Ч': ['4'],
+    'Т': ['7'],
+    'Ь': ['6'],
+    'Ъ': ['6'],
+    'Ғ': ['6'],
+    'Ђ': ['5', '6', '9'],
+}
+
+EXTRA_ALLOWED_CHARS = set(AMBIGUOUS_TO_DIGITS.keys())
+
 DEDUP_WINDOW_SECONDS = int(os.getenv("DEDUP_WINDOW_SECONDS", "30"))
 recent_plate_events = {}
 recent_plate_events_lock = threading.Lock()
@@ -99,33 +123,72 @@ def normalize_chars(text):
 
     for char in text:
         char = LATIN_TO_CYRILLIC.get(char, char)
-        if char in RUSSIAN_PLATE_CHARS:
+        if char in RUSSIAN_PLATE_CHARS or char in EXTRA_ALLOWED_CHARS:
             res.append(char)
 
     return "".join(res)
+
+def get_letter_candidates(char):
+    char = LATIN_TO_CYRILLIC.get(char, char)
+    candidates = set()
+    if char in VALID_LETTERS:
+        candidates.add(char)
+    if char in DIGIT_TO_LETTER:
+        candidates.add(DIGIT_TO_LETTER[char])
+    if char == '8':
+        candidates.update(['В', 'В'])
+    if char == '0':
+        candidates.add('О')
+    return [c for c in candidates if c in VALID_LETTERS]
+
+
+def get_digit_candidates(char):
+    char = LATIN_TO_CYRILLIC.get(char, char)
+    candidates = set()
+    if char in VALID_DIGITS:
+        candidates.add(char)
+    if char in LETTER_TO_DIGIT:
+        candidates.add(LETTER_TO_DIGIT[char])
+    if char in AMBIGUOUS_TO_DIGITS:
+        candidates.update(AMBIGUOUS_TO_DIGITS[char])
+    return [c for c in candidates if c in VALID_DIGITS]
+
+
+def try_fix_plate_from_window(window6):
+    if len(window6) < 6:
+        return None
+    chars = list(window6[:6])
+    pos_candidates = []
+    for idx, ch in enumerate(chars):
+        opts = get_letter_candidates(ch) if idx in (0, 4, 5) else get_digit_candidates(ch)
+        if not opts:
+            return None
+        pos_candidates.append(opts[:4])  # ограничиваем разветвление
+
+    best = None
+    for c0 in pos_candidates[0]:
+        for c1 in pos_candidates[1]:
+            for c2 in pos_candidates[2]:
+                for c3 in pos_candidates[3]:
+                    for c4 in pos_candidates[4]:
+                        for c5 in pos_candidates[5]:
+                            candidate = f"{c0}{c1}{c2}{c3}{c4}{c5}"
+                            if PLATE_REGEX.match(candidate):
+                                # Предпочитаем варианты с минимальным количеством замен.
+                                edits = sum(1 for i, src in enumerate(chars) if candidate[i] != src)
+                                if best is None or edits < best[0]:
+                                    best = (edits, candidate)
+    return best[1] if best else None
+
 
 def try_fix_plate(text):
     if len(text) < 6:
         return None
 
     for i in range(len(text) - 5):
-        candidate = list(text[i : i+6])
-
-        for pos in [0, 4, 5]:
-            char = candidate[pos]
-            if char not in VALID_LETTERS:
-                if char in DIGIT_TO_LETTER:
-                    candidate[pos] = DIGIT_TO_LETTER[char]
-
-        for pos in [1, 2, 3]:
-            char = candidate[pos]
-            if char not in VALID_DIGITS:
-                if char in LETTER_TO_DIGIT:
-                    candidate[pos] = LETTER_TO_DIGIT[char]
-
-        fixed_str = "".join(candidate)
-        if PLATE_REGEX.match(fixed_str):
-            return fixed_str
+        fixed = try_fix_plate_from_window(text[i : i + 6])
+        if fixed:
+            return fixed
 
     return None
 
