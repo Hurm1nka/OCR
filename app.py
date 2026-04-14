@@ -14,6 +14,10 @@ from paddleocr import PaddleOCR
 import logging
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS 
+try:
+    from ultralytics import YOLO
+except Exception:
+    YOLO = None
 
 # =================================================================
 # НАСТРОЙКИ И ИНИЦИАЛИЗАЦИЯ
@@ -60,32 +64,47 @@ except Exception as e:
     ocr_reader = None
     logger.exception("PaddleOCR init failed")
 
-VALID_LETTERS = "АВЕКМНОРСТУХ"
+YOLO_MODEL_PATH = os.getenv("YOLO_MODEL_PATH", os.path.join(BASE_DIR, "models", "license_plate.pt"))
+YOLO_CONF_THRESHOLD = float(os.getenv("YOLO_CONF_THRESHOLD", "0.25"))
+yolo_detector = None
+if YOLO is not None and os.path.exists(YOLO_MODEL_PATH):
+    try:
+        print(f"Загрузка YOLO модели: {YOLO_MODEL_PATH}")
+        yolo_detector = YOLO(YOLO_MODEL_PATH)
+        print("✅ YOLO модель загружена.")
+    except Exception as e:
+        logger.exception("YOLO init failed: %s", e)
+        yolo_detector = None
+else:
+    logger.info("YOLO detector disabled (module/model missing). path=%s", YOLO_MODEL_PATH)
+
+VALID_LETTERS = "ABEKMHOPCTYX"
 VALID_DIGITS = "0123456789"
 RUSSIAN_PLATE_CHARS = VALID_LETTERS + VALID_DIGITS
 
-PLATE_REGEX = re.compile(r'^[АВЕКМНОРСТУХ]\d{3}[АВЕКМНОРСТУХ]{2}$')
-PLATE_WITH_REGION_REGEX = re.compile(r'^([АВЕКМНОРСТУХ]\d{3}[АВЕКМНОРСТУХ]{2})(\d{2,3})?$')
+PLATE_REGEX = re.compile(r'^[ABEKMHOPCTYX]\d{3}[ABEKMHOPCTYX]{2}$')
+PLATE_WITH_REGION_REGEX = re.compile(r'^([ABEKMHOPCTYX]\d{3}[ABEKMHOPCTYX]{2})(\d{2,3})?$')
 
 DIGIT_TO_LETTER = {
-    '0': 'О', '4': 'А', '8': 'В', '3': 'З',
+    '0': 'O',
+    '4': 'A',
+    '8': 'B',
 }
 
 LETTER_TO_DIGIT = {
-    'O': '0', 'О': '0', 'D': '0', 'Q': '0',
-    'B': '8', 'В': '8',
+    'O': '0', 'D': '0', 'Q': '0',
+    'B': '8',
     'I': '1', 'L': '1',
     'Z': '2',
-    'Т': '7', 'T': '7',
+    'T': '7',
     'S': '5', 'G': '6'
 }
 
-LATIN_TO_CYRILLIC = {
-    'A': 'А', 'B': 'В', 'E': 'Е', 'K': 'К', 'M': 'М', 'H': 'Н', 
-    'O': 'О', 'P': 'Р', 'C': 'С', 'T': 'Т', 'X': 'Х', 'Y': 'У'
+CYRILLIC_TO_LATIN_PLATE = {
+    'А': 'A', 'В': 'B', 'Е': 'E', 'К': 'K', 'М': 'M', 'Н': 'H',
+    'О': 'O', 'Р': 'P', 'С': 'C', 'Т': 'T', 'У': 'Y', 'Х': 'X',
 }
 
-CYRILLIC_UPPER_RE = re.compile(r"[А-ЯЁ]")
 LATIN_UPPER_RE = re.compile(r"[A-Z]")
 ALNUM_PLATE_RE = re.compile(r"[A-ZА-ЯЁ0-9]")
 
@@ -108,42 +127,40 @@ def normalize_chars(text):
     for char in text:
         if not ALNUM_PLATE_RE.match(char):
             continue
-        char = LATIN_TO_CYRILLIC.get(char, char)
-        if char in RUSSIAN_PLATE_CHARS or CYRILLIC_UPPER_RE.match(char) or LATIN_UPPER_RE.match(char):
+        char = CYRILLIC_TO_LATIN_PLATE.get(char, char)
+        if char in RUSSIAN_PLATE_CHARS or LATIN_UPPER_RE.match(char):
             res.append(char)
 
     normalized = "".join(res)
     # Удаляем хвост "RUS/РУС", который часто читается отдельно на табличке.
-    normalized = re.sub(r"(РУС|RUS)$", "", normalized)
+    normalized = normalized.replace("RUS", "")
     return normalized
 
 def get_letter_candidates(char):
-    char = LATIN_TO_CYRILLIC.get(char, char)
+    char = CYRILLIC_TO_LATIN_PLATE.get(char, char)
     candidates = set()
     if char in VALID_LETTERS:
         candidates.add(char)
     if char in DIGIT_TO_LETTER:
         candidates.add(DIGIT_TO_LETTER[char])
     if char == '8':
-        candidates.update(['В', 'В'])
+        candidates.add('B')
     if char == '0':
-        candidates.add('О')
+        candidates.add('O')
     return [c for c in candidates if c in VALID_LETTERS]
 
 
 def get_digit_candidates(char):
-    char = LATIN_TO_CYRILLIC.get(char, char)
+    char = CYRILLIC_TO_LATIN_PLATE.get(char, char)
     candidates = set()
     if char in VALID_DIGITS:
         candidates.add(char)
     # Для цифр используем только консервативные, устойчивые замены.
-    if char in {'О', 'O', 'D', 'Q'}:
+    if char in {'O', 'D', 'Q'}:
         candidates.add('0')
-    if char in {'З'}:
-        candidates.add('3')
-    if char in {'Т', 'T'}:
+    if char in {'T'}:
         candidates.add('7')
-    if char in LETTER_TO_DIGIT and char in {'О', 'O', 'D', 'Q', 'Т', 'T'}:
+    if char in LETTER_TO_DIGIT and char in {'O', 'D', 'Q', 'T'}:
         candidates.add(LETTER_TO_DIGIT[char])
     return [c for c in candidates if c in VALID_DIGITS]
 
@@ -243,6 +260,18 @@ def mark_plate_event_and_check_duplicate(plate_base):
 def upscale(img):
     return cv2.resize(img, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
 
+def upscale_adaptive(img):
+    h, w = img.shape[:2]
+    # Для маленьких кадров агрессивнее увеличиваем изображение.
+    factor = 3 if max(h, w) < 900 else 2
+    return cv2.resize(img, None, fx=factor, fy=factor, interpolation=cv2.INTER_CUBIC)
+
+def sharpen_image(img):
+    kernel = np.array([[0, -1, 0],
+                       [-1, 5, -1],
+                       [0, -1, 0]], dtype=np.float32)
+    return cv2.filter2D(img, -1, kernel)
+
 def deskew_image(img):
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     coords = np.column_stack(np.where(gray > 0))
@@ -270,10 +299,14 @@ def generate_image_variants(img):
     variants = []
 
     img = deskew_image(img)
-    img = upscale(img)
+    img = upscale_adaptive(img)
     variants.append(img)
+    variants.append(sharpen_image(img))
 
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    gray_sharp = cv2.GaussianBlur(gray, (0, 0), 1.0)
+    gray_sharp = cv2.addWeighted(gray, 1.6, gray_sharp, -0.6, 0)
+    variants.append(gray_sharp)
 
     clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
     enhanced = clahe.apply(gray)
@@ -343,6 +376,53 @@ def extract_plate_like_regions(img):
 
     return rois[:5]
 
+
+def extract_plate_regions_yolo(img):
+    """
+    Поиск номера через YOLO-детектор.
+    Возвращает crops и короткие логи.
+    """
+    if yolo_detector is None:
+        return [], ["YOLO: detector disabled"]
+    try:
+        results = yolo_detector.predict(
+            source=img,
+            conf=YOLO_CONF_THRESHOLD,
+            verbose=False,
+            device="cpu",
+            imgsz=960,
+        )
+        if not results:
+            return [], ["YOLO: no results"]
+        r = results[0]
+        if r.boxes is None or len(r.boxes) == 0:
+            return [], ["YOLO: no boxes"]
+
+        h, w = img.shape[:2]
+        crops = []
+        logs = [f"YOLO: boxes={len(r.boxes)} conf>={YOLO_CONF_THRESHOLD:.2f}"]
+        boxes_xyxy = r.boxes.xyxy.cpu().numpy().astype(int)
+        boxes_conf = r.boxes.conf.cpu().numpy()
+        order = np.argsort(-boxes_conf)[:3]
+        for idx in order:
+            x1, y1, x2, y2 = boxes_xyxy[idx]
+            conf = float(boxes_conf[idx])
+            bw = max(1, x2 - x1)
+            bh = max(1, y2 - y1)
+            pad_x = int(bw * 0.08)
+            pad_y = int(bh * 0.20)
+            x1 = max(0, x1 - pad_x)
+            y1 = max(0, y1 - pad_y)
+            x2 = min(w, x2 + pad_x)
+            y2 = min(h, y2 + pad_y)
+            crop = img[y1:y2, x1:x2]
+            if crop.size > 0:
+                crops.append(crop)
+                logs.append(f"YOLO box conf={conf:.2f} size={x2-x1}x{y2-y1}")
+        return crops, logs
+    except Exception as e:
+        return [], [f"YOLO error: {e}"]
+
 # =================================================================
 # OCR PIPELINE
 # =================================================================
@@ -351,7 +431,11 @@ def process_ocr_pipeline(image_array):
     if ocr_reader is None:
         return "Модель не готова", "OCR pipeline не запущен: модель не готова", None, "", 0.0
 
-    variants = generate_image_variants(image_array)
+    yolo_rois, yolo_logs = extract_plate_regions_yolo(image_array)
+    variants = []
+    for roi in yolo_rois:
+        variants.extend(generate_image_variants(roi))
+    variants.extend(generate_image_variants(image_array))
     roi_variants = []
     for roi in extract_plate_like_regions(image_array):
         roi_variants.extend(generate_image_variants(roi))
@@ -360,7 +444,7 @@ def process_ocr_pipeline(image_array):
     best_plate = None
     best_region = ""
     best_confidence = 0.0
-    logs = []
+    logs = list(yolo_logs)
 
     for i, img_variant in enumerate(variants):
         try:
@@ -387,7 +471,7 @@ def process_ocr_pipeline(image_array):
 
                 ratio = width / height
 
-                if ratio < 1.2:
+                if ratio < 0.9:
                     logs.append(f"Var{i}: '{raw_text}' пропуск ratio={ratio:.2f}")
                     continue
 
@@ -685,8 +769,15 @@ def process_local_camera():
 @app.route('/health', methods=['GET'])
 def health():
     ready = ocr_reader is not None
+    yolo_ready = yolo_detector is not None
     # Важно: фронт сейчас ожидает model_loaded; оставляем совместимость
-    return jsonify({"status": "OK", "ready": ready, "model_loaded": ready}), 200
+    return jsonify({
+        "status": "OK",
+        "ready": ready,
+        "model_loaded": ready,
+        "yolo_loaded": yolo_ready,
+        "yolo_model_path": YOLO_MODEL_PATH,
+    }), 200
 
 
 @app.route('/barrier/open', methods=['POST'])

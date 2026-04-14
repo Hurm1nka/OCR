@@ -22,7 +22,8 @@ RUN pip install --no-cache-dir \
     opencv-python \
     flask \
     flask-cors \
-    gunicorn
+    gunicorn \
+    ultralytics
     
 
 # Устанавливаем рабочую директорию
