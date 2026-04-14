@@ -85,28 +85,47 @@ RUSSIAN_PLATE_CHARS = VALID_LETTERS + VALID_DIGITS
 PLATE_REGEX = re.compile(r'^[ABEKMHOPCTYX]\d{3}[ABEKMHOPCTYX]{2}$')
 PLATE_WITH_REGION_REGEX = re.compile(r'^([ABEKMHOPCTYX]\d{3}[ABEKMHOPCTYX]{2})(\d{2,3})?$')
 
-DIGIT_TO_LETTER = {
-    '0': 'O',
-    '4': 'A',
-    '8': 'B',
-}
-
-LETTER_TO_DIGIT = {
-    'O': '0', 'D': '0', 'Q': '0',
-    'B': '8',
-    'I': '1', 'L': '1',
-    'Z': '2',
-    'T': '7',
-    'S': '5', 'G': '6'
-}
-
 CYRILLIC_TO_LATIN_PLATE = {
     'А': 'A', 'В': 'B', 'Е': 'E', 'К': 'K', 'М': 'M', 'Н': 'H',
     'О': 'O', 'Р': 'P', 'С': 'C', 'Т': 'T', 'У': 'Y', 'Х': 'X',
 }
 
-LATIN_UPPER_RE = re.compile(r"[A-Z]")
-ALNUM_PLATE_RE = re.compile(r"[A-ZА-ЯЁ0-9]")
+# Сильные/средние/слабые подстановки с разным штрафом.
+LETTER_EQUIV_STRONG = {
+    '0': ['O'],
+    '4': ['A'],
+    '8': ['B'],
+}
+LETTER_EQUIV_MEDIUM = {
+    '6': ['B'],
+    '9': ['O'],
+}
+
+DIGIT_EQUIV_STRONG = {
+    'O': ['0'],
+    'D': ['0'],
+    'Q': ['0'],
+    'I': ['1'],
+    'L': ['1'],
+    'Z': ['2'],
+    'S': ['5'],
+    'G': ['6'],
+    'T': ['7'],
+    'B': ['8'],
+}
+DIGIT_EQUIV_WEAK = {
+    'Э': ['3', '9'],
+    'З': ['3'],
+    'Ч': ['4'],
+    'Б': ['6', '8'],
+    'Ь': ['6'],
+    'Ъ': ['6'],
+    'Ђ': ['6', '5', '9'],
+    'Ћ': ['6', '5', '9'],
+    'Є': ['6'],
+}
+
+ALLOWED_EXTRA_CHARS = set(DIGIT_EQUIV_WEAK.keys())
 
 DEDUP_WINDOW_SECONDS = int(os.getenv("DEDUP_WINDOW_SECONDS", "30"))
 recent_plate_events = {}
@@ -117,124 +136,131 @@ recent_plate_events_lock = threading.Lock()
 # =================================================================
 
 def normalize_chars(text):
-    """
-    Оставляем только латиницу/кириллицу/цифры.
-    Любые прочие символы (в т.ч. OCR-артефакты вроде Ђ) отбрасываются.
-    """
     text = text.upper()
     res = []
-
     for char in text:
-        if not ALNUM_PLATE_RE.match(char):
-            continue
-        char = CYRILLIC_TO_LATIN_PLATE.get(char, char)
-        if char in RUSSIAN_PLATE_CHARS or LATIN_UPPER_RE.match(char):
+        if 'A' <= char <= 'Z' or '0' <= char <= '9':
             res.append(char)
-
+            continue
+        mapped = CYRILLIC_TO_LATIN_PLATE.get(char)
+        if mapped:
+            res.append(mapped)
+            continue
+        if char in ALLOWED_EXTRA_CHARS:
+            res.append(char)
     normalized = "".join(res)
-    # Удаляем хвост "RUS/РУС", который часто читается отдельно на табличке.
+    # Хвост региона "RUS" не участвует в маске.
     normalized = normalized.replace("RUS", "")
     return normalized
 
-def get_letter_candidates(char):
-    char = CYRILLIC_TO_LATIN_PLATE.get(char, char)
-    candidates = set()
-    if char in VALID_LETTERS:
-        candidates.add(char)
-    if char in DIGIT_TO_LETTER:
-        candidates.add(DIGIT_TO_LETTER[char])
-    if char == '8':
-        candidates.add('B')
-    if char == '0':
-        candidates.add('O')
-    return [c for c in candidates if c in VALID_LETTERS]
+def letter_options(char):
+    c = CYRILLIC_TO_LATIN_PLATE.get(char, char)
+    opts = []
+    if c in VALID_LETTERS:
+        opts.append((c, 0.0))
+    for cand in LETTER_EQUIV_STRONG.get(c, []):
+        opts.append((cand, 0.18))
+    for cand in LETTER_EQUIV_MEDIUM.get(c, []):
+        opts.append((cand, 0.35))
+    # Убираем дубликаты, оставляя минимальный штраф
+    best = {}
+    for cand, cost in opts:
+        if cand in VALID_LETTERS and (cand not in best or cost < best[cand]):
+            best[cand] = cost
+    return list(best.items())
 
 
-def get_digit_candidates(char):
-    char = CYRILLIC_TO_LATIN_PLATE.get(char, char)
-    candidates = set()
-    if char in VALID_DIGITS:
-        candidates.add(char)
-    # Для цифр используем только консервативные, устойчивые замены.
-    if char in {'O', 'D', 'Q'}:
-        candidates.add('0')
-    if char in {'T'}:
-        candidates.add('7')
-    if char in LETTER_TO_DIGIT and char in {'O', 'D', 'Q', 'T'}:
-        candidates.add(LETTER_TO_DIGIT[char])
-    return [c for c in candidates if c in VALID_DIGITS]
+def digit_options(char):
+    c = CYRILLIC_TO_LATIN_PLATE.get(char, char)
+    opts = []
+    if c in VALID_DIGITS:
+        opts.append((c, 0.0))
+    for cand in DIGIT_EQUIV_STRONG.get(c, []):
+        opts.append((cand, 0.18))
+    for cand in DIGIT_EQUIV_WEAK.get(c, []):
+        opts.append((cand, 0.55))
+    best = {}
+    for cand, cost in opts:
+        if cand in VALID_DIGITS and (cand not in best or cost < best[cand]):
+            best[cand] = cost
+    return list(best.items())
 
 
 def try_fix_plate_from_window(window6):
     if len(window6) < 6:
-        return None
+        return None, 999.0
     chars = list(window6[:6])
     pos_candidates = []
     for idx, ch in enumerate(chars):
-        opts = get_letter_candidates(ch) if idx in (0, 4, 5) else get_digit_candidates(ch)
+        opts = letter_options(ch) if idx in (0, 4, 5) else digit_options(ch)
         if not opts:
-            return None
-        pos_candidates.append(opts[:4])  # ограничиваем разветвление
+            return None, 999.0
+        pos_candidates.append(opts[:5])
 
-    best = None
-    for c0 in pos_candidates[0]:
-        for c1 in pos_candidates[1]:
-            for c2 in pos_candidates[2]:
-                for c3 in pos_candidates[3]:
-                    for c4 in pos_candidates[4]:
-                        for c5 in pos_candidates[5]:
+    best_candidate = None
+    best_cost = 999.0
+    for c0, k0 in pos_candidates[0]:
+        for c1, k1 in pos_candidates[1]:
+            for c2, k2 in pos_candidates[2]:
+                for c3, k3 in pos_candidates[3]:
+                    for c4, k4 in pos_candidates[4]:
+                        for c5, k5 in pos_candidates[5]:
                             candidate = f"{c0}{c1}{c2}{c3}{c4}{c5}"
                             if PLATE_REGEX.match(candidate):
-                                # Предпочитаем варианты с минимальным количеством замен.
-                                edits = sum(1 for i, src in enumerate(chars) if candidate[i] != src)
-                                if best is None or edits < best[0]:
-                                    best = (edits, candidate)
-    return best[1] if best else None
+                                cost = k0 + k1 + k2 + k3 + k4 + k5
+                                if cost < best_cost:
+                                    best_cost = cost
+                                    best_candidate = candidate
+    return best_candidate, best_cost
 
 
 def try_fix_plate(text):
     if len(text) < 6:
-        return None
-
+        return None, 999.0
+    best_candidate = None
+    best_cost = 999.0
     for i in range(len(text) - 5):
-        fixed = try_fix_plate_from_window(text[i : i + 6])
-        if fixed:
-            return fixed
-
-    return None
+        fixed, cost = try_fix_plate_from_window(text[i : i + 6])
+        if fixed and cost < best_cost:
+            best_candidate = fixed
+            best_cost = cost
+    return best_candidate, best_cost
 
 
 def try_extract_plate_from_text(text):
-    """
-    Возвращает номер формата LDDDLL и, при наличии, регион (2-3 цифры).
-    """
     if len(text) < 6:
-        return None, None
-
+        return None, None, 999.0
+    best_plate = None
+    best_region = ""
+    best_cost = 999.0
     for i in range(len(text) - 5):
-        max_len = min(9, len(text) - i)  # 6 + регион до 3 цифр
+        max_len = min(9, len(text) - i)
         window = text[i : i + max_len]
-        fixed_base = try_fix_plate(window[:6])
+        fixed_base, base_cost = try_fix_plate(window[:6])
         if not fixed_base:
             continue
 
-        region = ""
-        for ch in window[6:]:
-            if ch in VALID_DIGITS:
-                region += ch
-            elif ch in LETTER_TO_DIGIT:
-                region += LETTER_TO_DIGIT[ch]
-            else:
+        region_chars = []
+        region_cost = 0.0
+        for ch in window[6:9]:
+            opts = digit_options(ch)
+            if not opts:
                 break
-
+            best_digit, best_digit_cost = min(opts, key=lambda x: x[1])
+            region_chars.append(best_digit)
+            region_cost += best_digit_cost
+        region = "".join(region_chars)
         if len(region) not in (0, 2, 3):
             region = ""
-
-        combined = fixed_base + region
+            region_cost = 0.0
+        combined = f"{fixed_base}{region}"
         if PLATE_WITH_REGION_REGEX.match(combined):
-            return fixed_base, region
-
-    return None, None
+            total_cost = base_cost + region_cost
+            if total_cost < best_cost:
+                best_plate = fixed_base
+                best_region = region
+                best_cost = total_cost
+    return best_plate, best_region, best_cost
 
 
 def prune_recent_plate_events(now_ts):
@@ -444,6 +470,7 @@ def process_ocr_pipeline(image_array):
     best_plate = None
     best_region = ""
     best_confidence = 0.0
+    best_total_score = -999.0
     logs = list(yolo_logs)
 
     for i, img_variant in enumerate(variants):
@@ -454,10 +481,12 @@ def process_ocr_pipeline(image_array):
                 logs.append(f"Var{i}: OCR не вернул текст")
                 continue
 
+            recognized_chunks = []
             for line in result[0]:
                 box = line[0]
                 raw_text = line[1][0]
                 confidence = line[1][1]
+                recognized_chunks.append((box, raw_text, confidence))
 
                 x_coords = [p[0] for p in box]
                 y_coords = [p[1] for p in box]
@@ -476,18 +505,41 @@ def process_ocr_pipeline(image_array):
                     continue
 
                 normalized = normalize_chars(raw_text)
-                fixed_plate, region = try_extract_plate_from_text(normalized)
+                fixed_plate, region, correction_cost = try_extract_plate_from_text(normalized)
                 plate_for_log = (fixed_plate + region) if fixed_plate else None
-                log_entry = f"Var{i}: '{raw_text}' -> '{normalized}' -> '{plate_for_log}' ({confidence:.2f})"
+                log_entry = f"Var{i}: '{raw_text}' -> '{normalized}' -> '{plate_for_log}' ({confidence:.2f}, cost={correction_cost:.2f})"
                 logs.append(log_entry)
 
                 if fixed_plate and PLATE_REGEX.match(fixed_plate):
-                    if confidence > best_confidence:
+                    # Совмещаем уверенность OCR и штраф за агрессивные подстановки.
+                    total_score = confidence - (0.22 * correction_cost)
+                    if total_score > best_total_score:
                         best_plate = fixed_plate
                         best_region = region
                         best_confidence = confidence
+                        best_total_score = total_score
 
-            if best_plate and best_confidence > 0.9:
+            # Частый кейс: OCR вернул номер в нескольких кусках (например "A695KA" + "799").
+            if recognized_chunks:
+                by_position = sorted(
+                    recognized_chunks,
+                    key=lambda item: (min(p[1] for p in item[0]), min(p[0] for p in item[0]))
+                )
+                merged_raw = "".join([item[1] for item in by_position])
+                merged_norm = normalize_chars(merged_raw)
+                fixed_plate, region, correction_cost = try_extract_plate_from_text(merged_norm)
+                merged_conf = float(np.mean([item[2] for item in by_position]))
+                merged_log = f"Var{i} merged: '{merged_raw}' -> '{merged_norm}' -> '{(fixed_plate + region) if fixed_plate else None}' ({merged_conf:.2f}, cost={correction_cost:.2f})"
+                logs.append(merged_log)
+                if fixed_plate and PLATE_REGEX.match(fixed_plate):
+                    total_score = merged_conf - (0.22 * correction_cost) + 0.05
+                    if total_score > best_total_score:
+                        best_plate = fixed_plate
+                        best_region = region
+                        best_confidence = merged_conf
+                        best_total_score = total_score
+
+            if best_plate and best_total_score > 0.88:
                 break
 
         except Exception as e:
@@ -500,13 +552,14 @@ def process_ocr_pipeline(image_array):
             if fallback_result and fallback_result[0]:
                 merged = "".join([line[1][0] for line in fallback_result[0]])
                 normalized = normalize_chars(merged)
-                fixed_plate, region = try_extract_plate_from_text(normalized)
+                fixed_plate, region, correction_cost = try_extract_plate_from_text(normalized)
                 plate_for_log = (fixed_plate + region) if fixed_plate else None
-                logs.append(f"Fallback merged: '{merged}' -> '{normalized}' -> '{plate_for_log}'")
+                logs.append(f"Fallback merged: '{merged}' -> '{normalized}' -> '{plate_for_log}' (cost={correction_cost:.2f})")
                 if fixed_plate and PLATE_REGEX.match(fixed_plate):
                     best_plate = fixed_plate
                     best_region = region
                     best_confidence = 0.5
+                    best_total_score = 0.5 - (0.22 * correction_cost)
         except Exception as e:
             logs.append(f"Fallback error: {e}")
 
