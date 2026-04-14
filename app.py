@@ -64,6 +64,20 @@ except Exception as e:
     ocr_reader = None
     logger.exception("PaddleOCR init failed")
 
+print("Загрузка дополнительной OCR модели (EN)...")
+try:
+    ocr_reader_en = PaddleOCR(
+        lang="en",
+        use_textline_orientation=False,
+        use_gpu=False,
+        drop_score=0.2
+    )
+    print("✅ EN OCR модель успешно загружена.")
+except Exception as e:
+    print(f"⚠️ EN OCR не загружен: {e}")
+    ocr_reader_en = None
+    logger.exception("PaddleOCR EN init failed")
+
 YOLO_MODEL_PATH = os.getenv("YOLO_MODEL_PATH", os.path.join(BASE_DIR, "models", "license_plate.pt"))
 YOLO_CONF_THRESHOLD = float(os.getenv("YOLO_CONF_THRESHOLD", "0.25"))
 yolo_detector = None
@@ -112,6 +126,11 @@ DIGIT_EQUIV_STRONG = {
     'G': ['6'],
     'T': ['7'],
     'B': ['8'],
+}
+DIGIT_EQUIV_MEDIUM = {
+    'O': ['6', '9'],
+    'C': ['6'],
+    'Q': ['9'],
 }
 DIGIT_EQUIV_WEAK = {
     'Э': ['3', '9'],
@@ -177,6 +196,8 @@ def digit_options(char):
         opts.append((c, 0.0))
     for cand in DIGIT_EQUIV_STRONG.get(c, []):
         opts.append((cand, 0.18))
+    for cand in DIGIT_EQUIV_MEDIUM.get(c, []):
+        opts.append((cand, 0.34))
     for cand in DIGIT_EQUIV_WEAK.get(c, []):
         opts.append((cand, 0.55))
     best = {}
@@ -255,7 +276,10 @@ def try_extract_plate_from_text(text):
             region_cost = 0.0
         combined = f"{fixed_base}{region}"
         if PLATE_WITH_REGION_REGEX.match(combined):
-            total_cost = base_cost + region_cost
+            digits_part = fixed_base[1:4]
+            # Слишком "нулевые" варианты обычно ложные (например 006).
+            zero_penalty = 0.35 if digits_part.count('0') >= 2 else 0.0
+            total_cost = base_cost + region_cost + zero_penalty
             if total_cost < best_cost:
                 best_plate = fixed_base
                 best_region = region
@@ -454,7 +478,7 @@ def extract_plate_regions_yolo(img):
 # =================================================================
 
 def process_ocr_pipeline(image_array):
-    if ocr_reader is None:
+    if ocr_reader is None and ocr_reader_en is None:
         return "Модель не готова", "OCR pipeline не запущен: модель не готова", None, "", 0.0
 
     yolo_rois, yolo_logs = extract_plate_regions_yolo(image_array)
@@ -473,71 +497,76 @@ def process_ocr_pipeline(image_array):
     best_total_score = -999.0
     logs = list(yolo_logs)
 
+    readers = []
+    if ocr_reader is not None:
+        readers.append(("ru", ocr_reader))
+    if ocr_reader_en is not None:
+        readers.append(("en", ocr_reader_en))
+
     for i, img_variant in enumerate(variants):
         try:
-            result = ocr_reader.ocr(img_variant, cls=False)
+            for reader_name, reader in readers:
+                result = reader.ocr(img_variant, cls=False)
 
-            if not result or not result[0]:
-                logs.append(f"Var{i}: OCR не вернул текст")
-                continue
-
-            recognized_chunks = []
-            for line in result[0]:
-                box = line[0]
-                raw_text = line[1][0]
-                confidence = line[1][1]
-                recognized_chunks.append((box, raw_text, confidence))
-
-                x_coords = [p[0] for p in box]
-                y_coords = [p[1] for p in box]
-
-                width = max(x_coords) - min(x_coords)
-                height = max(y_coords) - min(y_coords)
-
-                if height == 0:
-                    logs.append(f"Var{i}: пропуск бокса (height=0)")
+                if not result or not result[0]:
+                    logs.append(f"Var{i}/{reader_name}: OCR не вернул текст")
                     continue
 
-                ratio = width / height
+                recognized_chunks = []
+                for line in result[0]:
+                    box = line[0]
+                    raw_text = line[1][0]
+                    confidence = line[1][1]
+                    recognized_chunks.append((box, raw_text, confidence))
 
-                if ratio < 0.9:
-                    logs.append(f"Var{i}: '{raw_text}' пропуск ratio={ratio:.2f}")
-                    continue
+                    x_coords = [p[0] for p in box]
+                    y_coords = [p[1] for p in box]
 
-                normalized = normalize_chars(raw_text)
-                fixed_plate, region, correction_cost = try_extract_plate_from_text(normalized)
-                plate_for_log = (fixed_plate + region) if fixed_plate else None
-                log_entry = f"Var{i}: '{raw_text}' -> '{normalized}' -> '{plate_for_log}' ({confidence:.2f}, cost={correction_cost:.2f})"
-                logs.append(log_entry)
+                    width = max(x_coords) - min(x_coords)
+                    height = max(y_coords) - min(y_coords)
 
-                if fixed_plate and PLATE_REGEX.match(fixed_plate):
-                    # Совмещаем уверенность OCR и штраф за агрессивные подстановки.
-                    total_score = confidence - (0.22 * correction_cost)
-                    if total_score > best_total_score:
-                        best_plate = fixed_plate
-                        best_region = region
-                        best_confidence = confidence
-                        best_total_score = total_score
+                    if height == 0:
+                        logs.append(f"Var{i}/{reader_name}: пропуск бокса (height=0)")
+                        continue
 
-            # Частый кейс: OCR вернул номер в нескольких кусках (например "A695KA" + "799").
-            if recognized_chunks:
-                by_position = sorted(
-                    recognized_chunks,
-                    key=lambda item: (min(p[1] for p in item[0]), min(p[0] for p in item[0]))
-                )
-                merged_raw = "".join([item[1] for item in by_position])
-                merged_norm = normalize_chars(merged_raw)
-                fixed_plate, region, correction_cost = try_extract_plate_from_text(merged_norm)
-                merged_conf = float(np.mean([item[2] for item in by_position]))
-                merged_log = f"Var{i} merged: '{merged_raw}' -> '{merged_norm}' -> '{(fixed_plate + region) if fixed_plate else None}' ({merged_conf:.2f}, cost={correction_cost:.2f})"
-                logs.append(merged_log)
-                if fixed_plate and PLATE_REGEX.match(fixed_plate):
-                    total_score = merged_conf - (0.22 * correction_cost) + 0.05
-                    if total_score > best_total_score:
-                        best_plate = fixed_plate
-                        best_region = region
-                        best_confidence = merged_conf
-                        best_total_score = total_score
+                    ratio = width / height
+
+                    if ratio < 0.85:
+                        logs.append(f"Var{i}/{reader_name}: '{raw_text}' пропуск ratio={ratio:.2f}")
+                        continue
+
+                    normalized = normalize_chars(raw_text)
+                    fixed_plate, region, correction_cost = try_extract_plate_from_text(normalized)
+                    plate_for_log = (fixed_plate + region) if fixed_plate else None
+                    log_entry = f"Var{i}/{reader_name}: '{raw_text}' -> '{normalized}' -> '{plate_for_log}' ({confidence:.2f}, cost={correction_cost:.2f})"
+                    logs.append(log_entry)
+
+                    if fixed_plate and PLATE_REGEX.match(fixed_plate):
+                        total_score = confidence - (0.14 * correction_cost)
+                        if total_score > best_total_score:
+                            best_plate = fixed_plate
+                            best_region = region
+                            best_confidence = confidence
+                            best_total_score = total_score
+
+                if recognized_chunks:
+                    by_position = sorted(
+                        recognized_chunks,
+                        key=lambda item: (min(p[1] for p in item[0]), min(p[0] for p in item[0]))
+                    )
+                    merged_raw = "".join([item[1] for item in by_position])
+                    merged_norm = normalize_chars(merged_raw)
+                    fixed_plate, region, correction_cost = try_extract_plate_from_text(merged_norm)
+                    merged_conf = float(np.mean([item[2] for item in by_position]))
+                    merged_log = f"Var{i}/{reader_name} merged: '{merged_raw}' -> '{merged_norm}' -> '{(fixed_plate + region) if fixed_plate else None}' ({merged_conf:.2f}, cost={correction_cost:.2f})"
+                    logs.append(merged_log)
+                    if fixed_plate and PLATE_REGEX.match(fixed_plate):
+                        total_score = merged_conf - (0.14 * correction_cost) + 0.05
+                        if total_score > best_total_score:
+                            best_plate = fixed_plate
+                            best_region = region
+                            best_confidence = merged_conf
+                            best_total_score = total_score
 
             if best_plate and best_total_score > 0.88:
                 break
@@ -548,18 +577,21 @@ def process_ocr_pipeline(image_array):
 
     if not best_plate:
         try:
-            fallback_result = ocr_reader.ocr(image_array, cls=False)
-            if fallback_result and fallback_result[0]:
-                merged = "".join([line[1][0] for line in fallback_result[0]])
-                normalized = normalize_chars(merged)
-                fixed_plate, region, correction_cost = try_extract_plate_from_text(normalized)
-                plate_for_log = (fixed_plate + region) if fixed_plate else None
-                logs.append(f"Fallback merged: '{merged}' -> '{normalized}' -> '{plate_for_log}' (cost={correction_cost:.2f})")
-                if fixed_plate and PLATE_REGEX.match(fixed_plate):
-                    best_plate = fixed_plate
-                    best_region = region
-                    best_confidence = 0.5
-                    best_total_score = 0.5 - (0.22 * correction_cost)
+            for reader_name, reader in readers:
+                fallback_result = reader.ocr(image_array, cls=False)
+                if fallback_result and fallback_result[0]:
+                    merged = "".join([line[1][0] for line in fallback_result[0]])
+                    normalized = normalize_chars(merged)
+                    fixed_plate, region, correction_cost = try_extract_plate_from_text(normalized)
+                    plate_for_log = (fixed_plate + region) if fixed_plate else None
+                    logs.append(f"Fallback/{reader_name} merged: '{merged}' -> '{normalized}' -> '{plate_for_log}' (cost={correction_cost:.2f})")
+                    if fixed_plate and PLATE_REGEX.match(fixed_plate):
+                        score = 0.5 - (0.14 * correction_cost)
+                        if score > best_total_score:
+                            best_plate = fixed_plate
+                            best_region = region
+                            best_confidence = 0.5
+                            best_total_score = score
         except Exception as e:
             logs.append(f"Fallback error: {e}")
 
