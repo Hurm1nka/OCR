@@ -42,7 +42,7 @@
 
 <div class="container mx-auto bg-white shadow-xl rounded-2xl p-6 md:p-10 border border-gray-100">
     <h1 class="text-3xl font-extrabold text-gray-800 mb-2">📸 OCR Номерных Знаков РФ</h1>
-    <p class="text-gray-500 mb-6">Используйте камеру или загрузите файл. Анализ выполняется локальным Docker-сервисом.</p>
+    <p class="text-gray-500 mb-6">Используйте камеру или загрузите файл. Основной формат номера: <b>БЦЦЦББ</b> (без региона).</p>
 
     <div id="serviceStatus" class="p-3 bg-yellow-100 text-yellow-700 rounded-lg mb-6 text-center font-medium">
         ⏳ Проверка статуса локального OCR-сервиса...
@@ -185,6 +185,11 @@
         <div class="bg-blue-50 border-l-4 border-blue-500 text-blue-800 p-4 rounded-lg mb-4" role="alert">
             <p class="font-bold text-lg">Номер:</p>
             <p id="plateOutput" class="text-4xl font-extrabold"></p>
+            <p id="plateFullOutput" class="text-sm text-blue-900 mt-1"></p>
+        </div>
+
+        <div id="duplicatePlateHint" class="bg-amber-50 border-l-4 border-amber-500 text-amber-800 p-3 rounded-lg mb-4 hidden">
+            Этот номер уже недавно распознавался. Можно не писать дубль в БД.
         </div>
 
         <div id="noPlateWarning" class="bg-yellow-50 border-l-4 border-yellow-500 text-yellow-800 p-4 rounded-lg hidden">
@@ -206,6 +211,14 @@
         <span id="errorMessage" class="block sm:inline"></span>
     </div>
 
+    <div class="mt-6 pt-6 border-t border-gray-200">
+        <button id="openBarrierButton"
+                class="w-full px-4 py-3 bg-orange-600 text-white font-semibold rounded-xl shadow-lg hover:bg-orange-700 transition duration-300">
+            Открыть шлагбаум (заглушка)
+        </button>
+        <p id="barrierStatusText" class="text-xs text-gray-500 mt-2"></p>
+    </div>
+
 </div>
 
 <script>
@@ -213,11 +226,15 @@
     const plateOutput = document.getElementById('plateOutput');
     const explanationOutput = document.getElementById('explanationOutput');
     const ocrLogOutput = document.getElementById('ocrLogOutput');
+    const plateFullOutput = document.getElementById('plateFullOutput');
     const imagePreview = document.getElementById('imagePreview');
     const errorContainer = document.getElementById('errorContainer');
     const errorMessage = document.getElementById('errorMessage');
     const noPlateWarning = document.getElementById('noPlateWarning');
+    const duplicatePlateHint = document.getElementById('duplicatePlateHint');
     const serviceStatus = document.getElementById('serviceStatus');
+    const openBarrierButton = document.getElementById('openBarrierButton');
+    const barrierStatusText = document.getElementById('barrierStatusText');
 
     const videoElement = document.getElementById('videoElement');
     const canvasElement = document.getElementById('canvasElement');
@@ -268,6 +285,7 @@
     let HEALTH_CHECK_URL;
     let IP_CAMERA_PROCESS_URL;
     let LOCAL_CAMERA_PROCESS_URL;
+    let BARRIER_OPEN_URL;
     const q = API_FROM_QUERY && API_FROM_QUERY.trim();
     const m = API_FROM_META && API_FROM_META.trim();
     if (q) {
@@ -276,24 +294,28 @@
         HEALTH_CHECK_URL = `${base}/health`;
         IP_CAMERA_PROCESS_URL = `${base}/process_ip_camera`;
         LOCAL_CAMERA_PROCESS_URL = `${base}/process_local_camera`;
+        BARRIER_OPEN_URL = `${base}/barrier/open`;
     } else if (m) {
         const base = m.replace(/\/$/, '');
         OCR_SERVICE_URL = `${base}/process`;
         HEALTH_CHECK_URL = `${base}/health`;
         IP_CAMERA_PROCESS_URL = `${base}/process_ip_camera`;
         LOCAL_CAMERA_PROCESS_URL = `${base}/process_local_camera`;
+        BARRIER_OPEN_URL = `${base}/barrier/open`;
     } else if (window.location.protocol === 'file:') {
         const base = 'http://127.0.0.1:3020';
         OCR_SERVICE_URL = `${base}/process`;
         HEALTH_CHECK_URL = `${base}/health`;
         IP_CAMERA_PROCESS_URL = `${base}/process_ip_camera`;
         LOCAL_CAMERA_PROCESS_URL = `${base}/process_local_camera`;
+        BARRIER_OPEN_URL = `${base}/barrier/open`;
     } else {
         const dir = pageDirectoryBaseHref();
         HEALTH_CHECK_URL = new URL('health', dir).href;
         OCR_SERVICE_URL = new URL('process', dir).href;
         IP_CAMERA_PROCESS_URL = new URL('process_ip_camera', dir).href;
         LOCAL_CAMERA_PROCESS_URL = new URL('process_local_camera', dir).href;
+        BARRIER_OPEN_URL = new URL('barrier/open', dir).href;
     }
 
     let currentStream = null;
@@ -398,13 +420,16 @@
             }
             
             plateOutput.textContent = result.plate.toUpperCase() || '—';
+            plateFullOutput.textContent = result.plate_full ? `Полный номер (с регионом): ${result.plate_full.toUpperCase()}` : '';
             explanationOutput.textContent = result.model_explanation || result.confidence_explanation || 'Нет дополнительного объяснения.';
             ocrLogOutput.textContent = result.ocr_log || 'Лог OCR отсутствует.';
+            duplicatePlateHint.classList.toggle('hidden', !result.is_duplicate_recent);
             
             if (result.plate) {
                 noPlateWarning.classList.add('hidden');
             } else {
                 noPlateWarning.classList.remove('hidden');
+                duplicatePlateHint.classList.add('hidden');
             }
             
             resultsContainer.classList.remove('hidden');
@@ -538,13 +563,16 @@
 
             const result = await response.json();
             plateOutput.textContent = (result.plate || '').toUpperCase() || '—';
+            plateFullOutput.textContent = result.plate_full ? `Полный номер (с регионом): ${result.plate_full.toUpperCase()}` : '';
             explanationOutput.textContent = result.model_explanation || result.confidence_explanation || 'Нет дополнительного объяснения.';
             ocrLogOutput.textContent = result.ocr_log || 'Лог OCR отсутствует.';
             imagePreview.src = result.preview_data_url || '';
+            duplicatePlateHint.classList.toggle('hidden', !result.is_duplicate_recent);
             if (result.plate) {
                 noPlateWarning.classList.add('hidden');
             } else {
                 noPlateWarning.classList.remove('hidden');
+                duplicatePlateHint.classList.add('hidden');
             }
             resultsContainer.classList.remove('hidden');
         } catch (err) {
@@ -585,13 +613,16 @@
 
             const result = await response.json();
             plateOutput.textContent = (result.plate || '').toUpperCase() || '—';
+            plateFullOutput.textContent = result.plate_full ? `Полный номер (с регионом): ${result.plate_full.toUpperCase()}` : '';
             explanationOutput.textContent = result.model_explanation || result.confidence_explanation || 'Нет дополнительного объяснения.';
             ocrLogOutput.textContent = result.ocr_log || 'Лог OCR отсутствует.';
             imagePreview.src = result.preview_data_url || '';
+            duplicatePlateHint.classList.toggle('hidden', !result.is_duplicate_recent);
             if (result.plate) {
                 noPlateWarning.classList.add('hidden');
             } else {
                 noPlateWarning.classList.remove('hidden');
+                duplicatePlateHint.classList.add('hidden');
             }
             resultsContainer.classList.remove('hidden');
         } catch (err) {
@@ -716,6 +747,31 @@
             processImage(base64Image, loadingIndicatorFile);
         };
         reader.readAsDataURL(file);
+    });
+
+    openBarrierButton.addEventListener('click', async () => {
+        clearError();
+        barrierStatusText.textContent = 'Отправка команды...';
+        openBarrierButton.disabled = true;
+        try {
+            const response = await fetch(BARRIER_OPEN_URL, {
+                method: 'POST',
+                mode: 'cors',
+                cache: 'no-store',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ reason: 'manual_ui' })
+            });
+            const result = await response.json().catch(() => ({}));
+            if (!response.ok || !result.ok) {
+                throw new Error(result.error || `Ошибка: ${response.status}`);
+            }
+            barrierStatusText.textContent = 'Шлагбаум открыт (заглушка API).';
+        } catch (err) {
+            barrierStatusText.textContent = 'Не удалось открыть шлагбаум.';
+            displayError(`Ошибка команды шлагбаума: ${err.message}`);
+        } finally {
+            openBarrierButton.disabled = false;
+        }
     });
     
     // Initial service check and periodic checks

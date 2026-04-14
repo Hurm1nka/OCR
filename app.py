@@ -4,6 +4,7 @@ import sys
 import re
 import time
 import ipaddress
+import threading
 import cv2
 import numpy as np
 import base64
@@ -84,6 +85,10 @@ LATIN_TO_CYRILLIC = {
     'O': 'О', 'P': 'Р', 'C': 'С', 'T': 'Т', 'X': 'Х', 'Y': 'У'
 }
 
+DEDUP_WINDOW_SECONDS = int(os.getenv("DEDUP_WINDOW_SECONDS", "30"))
+recent_plate_events = {}
+recent_plate_events_lock = threading.Lock()
+
 # =================================================================
 # ЛОГИКА КОРРЕКЦИИ
 # =================================================================
@@ -157,6 +162,23 @@ def try_extract_plate_from_text(text):
 
     return None, None
 
+
+def prune_recent_plate_events(now_ts):
+    with recent_plate_events_lock:
+        stale = [k for k, ts in recent_plate_events.items() if now_ts - ts > DEDUP_WINDOW_SECONDS]
+        for key in stale:
+            del recent_plate_events[key]
+
+
+def mark_plate_event_and_check_duplicate(plate_base):
+    now_ts = time.time()
+    prune_recent_plate_events(now_ts)
+    with recent_plate_events_lock:
+        prev_ts = recent_plate_events.get(plate_base)
+        is_duplicate_recent = prev_ts is not None and (now_ts - prev_ts) <= DEDUP_WINDOW_SECONDS
+        recent_plate_events[plate_base] = now_ts
+    return is_duplicate_recent
+
 # =================================================================
 # IMAGE PROCESSING
 # =================================================================
@@ -224,6 +246,46 @@ def generate_image_variants(img):
 
     return variants
 
+
+def extract_plate_like_regions(img):
+    """
+    Извлекает ROI, похожие на номер (широкие прямоугольники с высокой контрастностью).
+    Это помогает OCR сфокусироваться на табличке, а не на всем кадре.
+    """
+    rois = []
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    blur = cv2.bilateralFilter(gray, 9, 75, 75)
+    grad_x = cv2.Sobel(blur, cv2.CV_32F, 1, 0, ksize=3)
+    grad_x = cv2.convertScaleAbs(grad_x)
+    _, bw = cv2.threshold(grad_x, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (17, 3))
+    bw = cv2.morphologyEx(bw, cv2.MORPH_CLOSE, kernel, iterations=2)
+
+    contours, _ = cv2.findContours(bw, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    h_img, w_img = gray.shape[:2]
+    for cnt in sorted(contours, key=cv2.contourArea, reverse=True)[:15]:
+        x, y, w, h = cv2.boundingRect(cnt)
+        if h <= 0:
+            continue
+        ratio = w / float(h)
+        area = w * h
+        # Типичный диапазон пропорций/площади для номерной таблички в кадре
+        if ratio < 2.0 or ratio > 7.0:
+            continue
+        if area < 0.01 * w_img * h_img:
+            continue
+        pad_x = int(w * 0.08)
+        pad_y = int(h * 0.25)
+        x1 = max(0, x - pad_x)
+        y1 = max(0, y - pad_y)
+        x2 = min(w_img, x + w + pad_x)
+        y2 = min(h_img, y + h + pad_y)
+        roi = img[y1:y2, x1:x2]
+        if roi.size > 0:
+            rois.append(roi)
+
+    return rois[:5]
+
 # =================================================================
 # OCR PIPELINE
 # =================================================================
@@ -233,6 +295,10 @@ def process_ocr_pipeline(image_array):
         return "Модель не готова", "OCR pipeline не запущен: модель не готова", None, "", 0.0
 
     variants = generate_image_variants(image_array)
+    roi_variants = []
+    for roi in extract_plate_like_regions(image_array):
+        roi_variants.extend(generate_image_variants(roi))
+    variants = variants + roi_variants
 
     best_plate = None
     best_region = ""
@@ -441,24 +507,31 @@ def process_data():
         model_explanation, ocr_log, plate, region, conf = process_ocr_pipeline(img)
         logger.info("process: plate=%r region=%r conf=%.4f", plate, region, conf)
         full_plate = f"{plate}{region}" if plate else ""
+        is_duplicate_recent = mark_plate_event_and_check_duplicate(plate) if plate else False
 
         if plate:
             res = {
-                "plate": full_plate,
+                "plate": plate,
                 "plate_base": plate,
+                "plate_full": full_plate,
                 "region": region,
                 "confidence_explanation": f"Найден: {full_plate} ({conf:.2f}).",
                 "model_explanation": model_explanation,
                 "ocr_log": ocr_log,
+                "is_duplicate_recent": is_duplicate_recent,
+                "dedup_window_seconds": DEDUP_WINDOW_SECONDS,
             }
         else:
             res = {
                 "plate": "",
                 "plate_base": "",
+                "plate_full": "",
                 "region": "",
                 "confidence_explanation": "Не найдено.",
                 "model_explanation": model_explanation,
                 "ocr_log": ocr_log,
+                "is_duplicate_recent": False,
+                "dedup_window_seconds": DEDUP_WINDOW_SECONDS,
             }
 
         return jsonify(res), 200
@@ -482,16 +555,20 @@ def process_ip_camera():
         model_explanation, ocr_log, plate, region, conf = process_ocr_pipeline(img)
         logger.info("process_ip_camera: plate=%r region=%r conf=%.4f", plate, region, conf)
         full_plate = f"{plate}{region}" if plate else ""
+        is_duplicate_recent = mark_plate_event_and_check_duplicate(plate) if plate else False
 
         preview_b64 = base64.b64encode(preview_bytes).decode("utf-8")
         res = {
-            "plate": full_plate,
+            "plate": plate or "",
             "plate_base": plate or "",
+            "plate_full": full_plate if plate else "",
             "region": region or "",
             "confidence_explanation": (f"Найден: {full_plate} ({conf:.2f})." if plate else "Не найдено."),
             "model_explanation": model_explanation,
             "ocr_log": ocr_log,
             "preview_data_url": f"data:image/jpeg;base64,{preview_b64}",
+            "is_duplicate_recent": is_duplicate_recent,
+            "dedup_window_seconds": DEDUP_WINDOW_SECONDS,
         }
         return jsonify(res), 200
     except Exception as e:
@@ -521,6 +598,7 @@ def process_local_camera():
 
         model_explanation, ocr_log, plate, region, conf = process_ocr_pipeline(frame)
         full_plate = f"{plate}{region}" if plate else ""
+        is_duplicate_recent = mark_plate_event_and_check_duplicate(plate) if plate else False
         logger.info("process_local_camera: plate=%r region=%r conf=%.4f", plate, region, conf)
 
         ok_jpg, jpg_buf = cv2.imencode(".jpg", frame)
@@ -530,13 +608,16 @@ def process_local_camera():
             preview_data_url = f"data:image/jpeg;base64,{preview_b64}"
 
         return jsonify({
-            "plate": full_plate,
+            "plate": plate or "",
             "plate_base": plate or "",
+            "plate_full": full_plate if plate else "",
             "region": region or "",
             "confidence_explanation": (f"Найден: {full_plate} ({conf:.2f})." if plate else "Не найдено."),
             "model_explanation": model_explanation,
             "ocr_log": ocr_log,
             "preview_data_url": preview_data_url,
+            "is_duplicate_recent": is_duplicate_recent,
+            "dedup_window_seconds": DEDUP_WINDOW_SECONDS,
         }), 200
     except Exception as e:
         logger.exception("process_local_camera: failed: %s", e)
@@ -549,6 +630,23 @@ def health():
     ready = ocr_reader is not None
     # Важно: фронт сейчас ожидает model_loaded; оставляем совместимость
     return jsonify({"status": "OK", "ready": ready, "model_loaded": ready}), 200
+
+
+@app.route('/barrier/open', methods=['POST'])
+def barrier_open():
+    """
+    Заглушка ручного открытия шлагбаума.
+    В будущем сюда можно подключить GPIO/PLC/внешний контроллер.
+    """
+    payload = request.get_json(silent=True) or {}
+    reason = (payload.get("reason") or "manual").strip()[:64]
+    logger.info("barrier_open: stub triggered reason=%s", reason)
+    return jsonify({
+        "ok": True,
+        "message": "Команда открытия шлагбаума отправлена (заглушка).",
+        "reason": reason,
+        "opened_at": int(time.time()),
+    }), 200
 
 # =================================================================
 # RUN
