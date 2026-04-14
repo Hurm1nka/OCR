@@ -85,29 +85,9 @@ LATIN_TO_CYRILLIC = {
     'O': 'О', 'P': 'Р', 'C': 'С', 'T': 'Т', 'X': 'Х', 'Y': 'У'
 }
 
-AMBIGUOUS_TO_DIGITS = {
-    'О': ['0'],
-    'O': ['0'],
-    'Q': ['0'],
-    'D': ['0'],
-    'I': ['1'],
-    'L': ['1'],
-    'Z': ['2'],
-    'Б': ['6', '8'],
-    'В': ['8'],
-    'S': ['5'],
-    'G': ['6'],
-    'Э': ['9', '3'],
-    'З': ['3'],
-    'Ч': ['4'],
-    'Т': ['7'],
-    'Ь': ['6'],
-    'Ъ': ['6'],
-    'Ғ': ['6'],
-    'Ђ': ['5', '6', '9'],
-}
-
-EXTRA_ALLOWED_CHARS = set(AMBIGUOUS_TO_DIGITS.keys())
+CYRILLIC_UPPER_RE = re.compile(r"[А-ЯЁ]")
+LATIN_UPPER_RE = re.compile(r"[A-Z]")
+ALNUM_PLATE_RE = re.compile(r"[A-ZА-ЯЁ0-9]")
 
 DEDUP_WINDOW_SECONDS = int(os.getenv("DEDUP_WINDOW_SECONDS", "30"))
 recent_plate_events = {}
@@ -118,15 +98,24 @@ recent_plate_events_lock = threading.Lock()
 # =================================================================
 
 def normalize_chars(text):
+    """
+    Оставляем только латиницу/кириллицу/цифры.
+    Любые прочие символы (в т.ч. OCR-артефакты вроде Ђ) отбрасываются.
+    """
     text = text.upper()
     res = []
 
     for char in text:
+        if not ALNUM_PLATE_RE.match(char):
+            continue
         char = LATIN_TO_CYRILLIC.get(char, char)
-        if char in RUSSIAN_PLATE_CHARS or char in EXTRA_ALLOWED_CHARS:
+        if char in RUSSIAN_PLATE_CHARS or CYRILLIC_UPPER_RE.match(char) or LATIN_UPPER_RE.match(char):
             res.append(char)
 
-    return "".join(res)
+    normalized = "".join(res)
+    # Удаляем хвост "RUS/РУС", который часто читается отдельно на табличке.
+    normalized = re.sub(r"(РУС|RUS)$", "", normalized)
+    return normalized
 
 def get_letter_candidates(char):
     char = LATIN_TO_CYRILLIC.get(char, char)
@@ -147,10 +136,15 @@ def get_digit_candidates(char):
     candidates = set()
     if char in VALID_DIGITS:
         candidates.add(char)
-    if char in LETTER_TO_DIGIT:
+    # Для цифр используем только консервативные, устойчивые замены.
+    if char in {'О', 'O', 'D', 'Q'}:
+        candidates.add('0')
+    if char in {'З'}:
+        candidates.add('3')
+    if char in {'Т', 'T'}:
+        candidates.add('7')
+    if char in LETTER_TO_DIGIT and char in {'О', 'O', 'D', 'Q', 'Т', 'T'}:
         candidates.add(LETTER_TO_DIGIT[char])
-    if char in AMBIGUOUS_TO_DIGITS:
-        candidates.update(AMBIGUOUS_TO_DIGITS[char])
     return [c for c in candidates if c in VALID_DIGITS]
 
 
