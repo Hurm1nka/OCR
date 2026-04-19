@@ -5,6 +5,7 @@ import re
 import time
 import ipaddress
 import threading
+import functools
 import cv2
 import numpy as np
 import base64
@@ -12,8 +13,11 @@ import urllib.request
 from urllib.parse import urlparse
 from paddleocr import PaddleOCR
 import logging
-from flask import Flask, request, jsonify, send_from_directory
-from flask_cors import CORS 
+from flask import Flask, request, jsonify, send_from_directory, session
+from flask_cors import CORS
+
+import database as arm_db
+
 try:
     from ultralytics import YOLO
 except Exception:
@@ -24,7 +28,8 @@ except Exception:
 # =================================================================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 app = Flask(__name__)
-CORS(app) 
+app.secret_key = os.environ.get("SECRET_KEY", "dev-secret-change-in-production")
+CORS(app, supports_credentials=True)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -32,6 +37,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger("ocr-service")
 logging.getLogger("ppocr").setLevel(logging.ERROR)
+
+try:
+    arm_db.init_db()
+    arm_db.ensure_default_guard_user()
+except Exception:
+    logger.exception("SQLite init failed")
 
 @app.before_request
 def log_request():
@@ -302,6 +313,55 @@ def mark_plate_event_and_check_duplicate(plate_base):
         is_duplicate_recent = prev_ts is not None and (now_ts - prev_ts) <= DEDUP_WINDOW_SECONDS
         recent_plate_events[plate_base] = now_ts
     return is_duplicate_recent
+
+
+def login_required(view):
+    @functools.wraps(view)
+    def wrapped(*args, **kwargs):
+        if not session.get("user_id"):
+            return jsonify({"error": "Требуется вход в систему"}), 401
+        return view(*args, **kwargs)
+
+    return wrapped
+
+
+def direction_from_payload(data):
+    d = (data.get("direction") or "entry").strip().lower()
+    if d not in ("entry", "exit"):
+        return None
+    return d
+
+
+def plate_base_from_user_string(s):
+    """Нормализация ввода для белого/чёрного списка (легковой формат)."""
+    if not s:
+        return None
+    t = normalize_chars(str(s).strip())
+    plate, _region, _cost = try_extract_plate_from_text(t)
+    if plate and PLATE_REGEX.match(plate):
+        return plate
+    return None
+
+
+def log_recognition_event(user_id, direction, plate, region, conf, source, is_dup, list_status):
+    if not plate or not user_id:
+        return
+    try:
+        full = f"{plate}{region or ''}"
+        arm_db.insert_recognition_event(
+            user_id,
+            direction,
+            plate,
+            full,
+            region or "",
+            conf,
+            source,
+            is_dup,
+            list_status,
+        )
+    except Exception:
+        logger.exception("log_recognition_event failed")
+
 
 # =================================================================
 # IMAGE PROCESSING
@@ -717,8 +777,15 @@ def index_page():
 
 
 @app.route('/process', methods=['POST'])
+@login_required
 def process_data():
     data = request.get_json(silent=True) or {}
+    direction = direction_from_payload(data)
+    if direction is None:
+        return jsonify({"error": "direction должен быть entry или exit"}), 400
+    raw_src = (data.get("source") or "upload").strip().lower()[:32]
+    if raw_src not in ("browser", "upload", "ip_camera", "local_camera"):
+        raw_src = "upload"
     base64_img = data.get('image_data')
     
     if not base64_img:
@@ -734,6 +801,18 @@ def process_data():
         logger.info("process: plate=%r region=%r conf=%.4f", plate, region, conf)
         full_plate = f"{plate}{region}" if plate else ""
         is_duplicate_recent = mark_plate_event_and_check_duplicate(plate) if plate else False
+        list_status = arm_db.resolve_list_status(plate) if plate else "none"
+        if plate:
+            log_recognition_event(
+                session["user_id"],
+                direction,
+                plate,
+                region,
+                conf,
+                raw_src,
+                is_duplicate_recent,
+                list_status,
+            )
 
         if plate:
             res = {
@@ -746,6 +825,7 @@ def process_data():
                 "ocr_log": ocr_log,
                 "is_duplicate_recent": is_duplicate_recent,
                 "dedup_window_seconds": DEDUP_WINDOW_SECONDS,
+                "list_status": list_status,
             }
         else:
             res = {
@@ -758,6 +838,7 @@ def process_data():
                 "ocr_log": ocr_log,
                 "is_duplicate_recent": False,
                 "dedup_window_seconds": DEDUP_WINDOW_SECONDS,
+                "list_status": "none",
             }
 
         return jsonify(res), 200
@@ -768,8 +849,12 @@ def process_data():
 
 
 @app.route('/process_ip_camera', methods=['POST'])
+@login_required
 def process_ip_camera():
     data = request.get_json(silent=True) or {}
+    direction = direction_from_payload(data)
+    if direction is None:
+        return jsonify({"error": "direction должен быть entry или exit"}), 400
     camera_url = normalize_camera_url((data.get("camera_url") or "").strip())
 
     if not camera_url:
@@ -782,6 +867,18 @@ def process_ip_camera():
         logger.info("process_ip_camera: plate=%r region=%r conf=%.4f", plate, region, conf)
         full_plate = f"{plate}{region}" if plate else ""
         is_duplicate_recent = mark_plate_event_and_check_duplicate(plate) if plate else False
+        list_status = arm_db.resolve_list_status(plate) if plate else "none"
+        if plate:
+            log_recognition_event(
+                session["user_id"],
+                direction,
+                plate,
+                region,
+                conf,
+                "ip_camera",
+                is_duplicate_recent,
+                list_status,
+            )
 
         preview_b64 = base64.b64encode(preview_bytes).decode("utf-8")
         res = {
@@ -795,6 +892,7 @@ def process_ip_camera():
             "preview_data_url": f"data:image/jpeg;base64,{preview_b64}",
             "is_duplicate_recent": is_duplicate_recent,
             "dedup_window_seconds": DEDUP_WINDOW_SECONDS,
+            "list_status": list_status,
         }
         return jsonify(res), 200
     except Exception as e:
@@ -803,8 +901,12 @@ def process_ip_camera():
 
 
 @app.route('/process_local_camera', methods=['POST'])
+@login_required
 def process_local_camera():
     data = request.get_json(silent=True) or {}
+    direction = direction_from_payload(data)
+    if direction is None:
+        return jsonify({"error": "direction должен быть entry или exit"}), 400
     camera_index = int(data.get('camera_index', 0))
 
     logger.info("process_local_camera: opening camera index=%s", camera_index)
@@ -826,6 +928,18 @@ def process_local_camera():
         full_plate = f"{plate}{region}" if plate else ""
         is_duplicate_recent = mark_plate_event_and_check_duplicate(plate) if plate else False
         logger.info("process_local_camera: plate=%r region=%r conf=%.4f", plate, region, conf)
+        list_status = arm_db.resolve_list_status(plate) if plate else "none"
+        if plate:
+            log_recognition_event(
+                session["user_id"],
+                direction,
+                plate,
+                region,
+                conf,
+                "local_camera",
+                is_duplicate_recent,
+                list_status,
+            )
 
         ok_jpg, jpg_buf = cv2.imencode(".jpg", frame)
         preview_data_url = ""
@@ -844,6 +958,7 @@ def process_local_camera():
             "preview_data_url": preview_data_url,
             "is_duplicate_recent": is_duplicate_recent,
             "dedup_window_seconds": DEDUP_WINDOW_SECONDS,
+            "list_status": list_status,
         }), 200
     except Exception as e:
         logger.exception("process_local_camera: failed: %s", e)
@@ -866,20 +981,147 @@ def health():
 
 
 @app.route('/barrier/open', methods=['POST'])
+@login_required
 def barrier_open():
     """
-    Заглушка ручного открытия шлагбаума.
-    В будущем сюда можно подключить GPIO/PLC/внешний контроллер.
+    Ручное открытие шлагбаума (имитация для диплома).
+    Физический привод не подключается — фиксируется только событие в БД.
     """
     payload = request.get_json(silent=True) or {}
-    reason = (payload.get("reason") or "manual").strip()[:64]
-    logger.info("barrier_open: stub triggered reason=%s", reason)
+    direction = direction_from_payload(payload)
+    if direction is None:
+        return jsonify({"error": "direction должен быть entry или exit"}), 400
+    note = (payload.get("note") or "").strip()[:200]
+    plate_base = (payload.get("plate_base") or "").strip().upper()[:16] or None
+    plate_full = (payload.get("plate_full") or "").strip().upper()[:24] or None
+    stub_message = (
+        "Имитация: команда «открыть шлагбаум» зарегистрирована в журнале. "
+        "Сервоприводы и реле не подключены."
+    )
+    logger.info(
+        "barrier_open: stub user=%s direction=%s plate_base=%s",
+        session.get("user_id"),
+        direction,
+        plate_base,
+    )
+    try:
+        arm_db.insert_barrier_stub_action(
+            session["user_id"],
+            direction,
+            plate_base,
+            plate_full,
+            note,
+            stub_message,
+        )
+    except Exception:
+        logger.exception("barrier_open: db log failed")
     return jsonify({
         "ok": True,
-        "message": "Команда открытия шлагбаума отправлена (заглушка).",
-        "reason": reason,
+        "message": stub_message,
+        "direction": direction,
         "opened_at": int(time.time()),
     }), 200
+
+
+@app.route("/api/auth/login", methods=["POST"])
+def api_auth_login():
+    data = request.get_json(silent=True) or {}
+    username = (data.get("username") or "").strip()
+    password = data.get("password") or ""
+    if not username or not password:
+        return jsonify({"error": "Укажите логин и пароль"}), 400
+    user = arm_db.verify_login(username, password)
+    if not user:
+        return jsonify({"error": "Неверный логин или пароль"}), 401
+    session["user_id"] = user["id"]
+    session["username"] = user["username"]
+    session["role"] = user["role"]
+    return jsonify({"ok": True, "username": user["username"], "role": user["role"]}), 200
+
+
+@app.route("/api/auth/logout", methods=["POST"])
+def api_auth_logout():
+    session.clear()
+    return jsonify({"ok": True}), 200
+
+
+@app.route("/api/auth/me", methods=["GET"])
+def api_auth_me():
+    if not session.get("user_id"):
+        return jsonify({"authenticated": False}), 200
+    return jsonify(
+        {
+            "authenticated": True,
+            "user_id": session["user_id"],
+            "username": session.get("username"),
+            "role": session.get("role"),
+        }
+    ), 200
+
+
+@app.route("/api/journal/recognitions", methods=["GET"])
+@login_required
+def api_journal_recognitions():
+    sort = request.args.get("sort", "created_at")
+    order = request.args.get("order", "desc")
+    q = (request.args.get("q") or "").strip()
+    limit = request.args.get("limit", 100, type=int)
+    offset = request.args.get("offset", 0, type=int)
+    rows, total = arm_db.journal_recognitions(sort=sort, order=order, q=q, limit=limit, offset=offset)
+    return jsonify({"items": rows, "total": total}), 200
+
+
+@app.route("/api/journal/barrier", methods=["GET"])
+@login_required
+def api_journal_barrier():
+    sort = request.args.get("sort", "created_at")
+    order = request.args.get("order", "desc")
+    q = (request.args.get("q") or "").strip()
+    limit = request.args.get("limit", 100, type=int)
+    offset = request.args.get("offset", 0, type=int)
+    rows, total = arm_db.journal_barrier_actions(sort=sort, order=order, q=q, limit=limit, offset=offset)
+    return jsonify({"items": rows, "total": total}), 200
+
+
+@app.route("/api/lists/<list_type>", methods=["GET"])
+@login_required
+def api_lists_get(list_type):
+    if list_type not in ("white", "black"):
+        return jsonify({"error": "list_type: white или black"}), 400
+    items = arm_db.fetch_plate_list(list_type)
+    return jsonify({"items": items}), 200
+
+
+@app.route("/api/lists/<list_type>", methods=["POST"])
+@login_required
+def api_lists_add(list_type):
+    if list_type not in ("white", "black"):
+        return jsonify({"error": "list_type: white или black"}), 400
+    data = request.get_json(silent=True) or {}
+    plate_raw = data.get("plate") or ""
+    note = (data.get("note") or "").strip()[:200]
+    plate = plate_base_from_user_string(plate_raw)
+    if not plate:
+        return jsonify({"error": "Номер не распознан как легковой формат БЦЦЦББ"}), 400
+    try:
+        arm_db.add_plate_list_entry(list_type, plate, note, session["user_id"])
+    except Exception as e:
+        logger.exception("api_lists_add failed")
+        return jsonify({"error": str(e)}), 500
+    return jsonify({"ok": True, "plate_base": plate}), 200
+
+
+@app.route("/api/lists/<int:entry_id>", methods=["DELETE"])
+@login_required
+def api_lists_delete(entry_id):
+    try:
+        n = arm_db.delete_plate_list_entry(entry_id)
+    except Exception as e:
+        logger.exception("api_lists_delete failed")
+        return jsonify({"error": str(e)}), 500
+    if not n:
+        return jsonify({"error": "Запись не найдена"}), 404
+    return jsonify({"ok": True}), 200
 
 # =================================================================
 # RUN

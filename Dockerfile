@@ -36,7 +36,7 @@ ARG CACHEBUST=0
 RUN echo "build=${CACHEBUST}"
 
 # Копируем файлы приложения (этот слой пересобирается после смены CACHEBUST или после правок файлов)
-COPY app.py index.html gunicorn.conf.py ./
+COPY app.py database.py index.html gunicorn.conf.py ./
 
 # Ограничение потоков BLAS/OpenMP снижает риск OOM и «штормов» CPU в контейнере
 ENV OMP_NUM_THREADS=2 \

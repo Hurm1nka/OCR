@@ -7,7 +7,7 @@
     <!-- Если сайт за nginx без прокси /health и /process — укажите полный URL API (часто тот же хост): -->
     <meta name="ocr-api-base" content="">
     <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate">
-    <title>OCR Номерных Знаков РФ (Веб-сервис)</title>
+    <title>АРМ охраны — контроль въезда/выезда (OCR)</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap');
@@ -16,7 +16,7 @@
             background-color: #f7f9fb;
         }
         .container {
-            max-width: 600px;
+            max-width: 720px;
         }
         .loader {
             border-top-color: #3b82f6;
@@ -40,13 +40,54 @@
 </head>
 <body class="p-4 md:p-8">
 
+<div id="loginPanel" class="container mx-auto bg-white shadow-xl rounded-2xl p-6 md:p-10 border border-gray-100 max-w-md">
+    <h1 class="text-2xl font-extrabold text-gray-800 mb-2">Вход в АРМ</h1>
+    <p class="text-sm text-gray-500 mb-4">Доступ к распознаванию и журналу только после авторизации.</p>
+    <label class="block text-sm font-medium text-gray-700 mb-1">Логин</label>
+    <input type="text" id="loginUsername" autocomplete="username" class="w-full px-3 py-2 border border-gray-300 rounded-lg mb-3" value="guard">
+    <label class="block text-sm font-medium text-gray-700 mb-1">Пароль</label>
+    <input type="password" id="loginPassword" autocomplete="current-password" class="w-full px-3 py-2 border border-gray-300 rounded-lg mb-4" placeholder="Пароль">
+    <button type="button" id="loginSubmitButton" class="w-full px-4 py-3 bg-slate-800 text-white font-semibold rounded-xl shadow-lg hover:bg-slate-900">Войти</button>
+    <p id="loginError" class="text-sm text-red-600 mt-3 hidden"></p>
+    <p class="text-xs text-gray-400 mt-4">Первый запуск: пользователь <code class="bg-gray-100 px-1 rounded">guard</code>, пароль из переменной окружения <code class="bg-gray-100 px-1 rounded">INITIAL_GUARD_PASSWORD</code> (по умолчанию для демо <code class="bg-gray-100 px-1 rounded">guard123</code>).</p>
+</div>
+
+<div id="armApp" class="hidden">
 <div class="container mx-auto bg-white shadow-xl rounded-2xl p-6 md:p-10 border border-gray-100">
-    <h1 class="text-3xl font-extrabold text-gray-800 mb-2">📸 OCR Номерных Знаков РФ</h1>
-    <p class="text-gray-500 mb-6">Используйте камеру или загрузите файл. Основной формат номера: <b>БЦЦЦББ</b> (без региона).</p>
+    <div class="flex flex-wrap items-start justify-between gap-3 mb-4">
+        <div>
+            <h1 class="text-3xl font-extrabold text-gray-800 mb-1">АРМ охраны</h1>
+            <p class="text-gray-500 text-sm">Один пост: въезд и выезд. Легковые номера, регион по желанию в OCR. Фото кадра только на экране, в БД не сохраняется.</p>
+        </div>
+        <div class="text-right text-sm">
+            <p class="text-gray-600">Оператор: <span id="operatorName" class="font-semibold text-gray-800">—</span></p>
+            <button type="button" id="logoutButton" class="mt-1 text-indigo-600 hover:underline">Выйти</button>
+        </div>
+    </div>
+
+    <div class="flex flex-wrap gap-2 mb-4 border-b border-gray-200 pb-2">
+        <button type="button" class="tab-btn px-4 py-2 rounded-lg font-semibold bg-indigo-600 text-white" data-tab="kpp">КПП / OCR</button>
+        <button type="button" class="tab-btn px-4 py-2 rounded-lg font-semibold text-gray-600 hover:bg-gray-100" data-tab="journal">Журнал</button>
+        <button type="button" class="tab-btn px-4 py-2 rounded-lg font-semibold text-gray-600 hover:bg-gray-100" data-tab="lists">Списки</button>
+    </div>
+
+    <div class="mb-4 p-3 bg-slate-50 rounded-xl border border-slate-200 flex flex-wrap items-center gap-4">
+        <span class="text-sm font-medium text-gray-700">Направление для записей в БД:</span>
+        <label class="inline-flex items-center gap-2 cursor-pointer text-sm">
+            <input type="radio" name="direction" value="entry" class="text-indigo-600" checked>
+            Въезд
+        </label>
+        <label class="inline-flex items-center gap-2 cursor-pointer text-sm">
+            <input type="radio" name="direction" value="exit" class="text-indigo-600">
+            Выезд
+        </label>
+    </div>
 
     <div id="serviceStatus" class="p-3 bg-yellow-100 text-yellow-700 rounded-lg mb-6 text-center font-medium">
         ⏳ Проверка статуса локального OCR-сервиса...
     </div>
+
+    <div id="tabKpp">
 
     <div id="liveCaptureSection" class="p-4 bg-gray-50 rounded-xl border border-gray-200 mb-6">
         <h3 class="text-xl font-semibold text-gray-700 mb-3">Режим: Прямой захват</h3>
@@ -189,8 +230,10 @@
         </div>
 
         <div id="duplicatePlateHint" class="bg-amber-50 border-l-4 border-amber-500 text-amber-800 p-3 rounded-lg mb-4 hidden">
-            Этот номер уже недавно распознавался. Можно не писать дубль в БД.
+            Этот номер уже недавно распознавался — в интерфейсе помечен как повтор; в журнале БД всё равно фиксируется событие с флагом «дубликат».
         </div>
+
+        <div id="listStatusHint" class="hidden p-3 rounded-lg mb-4 text-sm font-medium border"></div>
 
         <div id="noPlateWarning" class="bg-yellow-50 border-l-4 border-yellow-500 text-yellow-800 p-4 rounded-lg hidden">
             <p class="font-bold">⚠️ Номер не найден.</p>
@@ -219,7 +262,87 @@
         <p id="barrierStatusText" class="text-xs text-gray-500 mt-2"></p>
     </div>
 
+    </div><!-- /tabKpp -->
+
+    <div id="tabJournal" class="hidden space-y-4">
+        <h2 class="text-xl font-semibold text-gray-800">Журнал</h2>
+        <div class="flex flex-wrap gap-2 items-end">
+            <input type="text" id="journalSearch" placeholder="Поиск по номеру, оператору…" class="flex-1 min-w-[200px] px-3 py-2 border border-gray-300 rounded-lg">
+            <select id="journalSort" class="px-3 py-2 border border-gray-300 rounded-lg text-sm">
+                <option value="created_at">По времени</option>
+                <option value="plate_base">По номеру</option>
+                <option value="confidence">По уверенности</option>
+                <option value="list_status">По списку</option>
+            </select>
+            <select id="journalOrder" class="px-3 py-2 border border-gray-300 rounded-lg text-sm">
+                <option value="desc">По убыванию</option>
+                <option value="asc">По возрастанию</option>
+            </select>
+            <button type="button" id="journalRefreshBtn" class="px-4 py-2 bg-indigo-600 text-white rounded-lg font-semibold hover:bg-indigo-700">Обновить</button>
+        </div>
+        <div class="overflow-x-auto border border-gray-200 rounded-xl">
+            <table class="min-w-full text-sm text-left">
+                <thead class="bg-gray-100 text-gray-700">
+                    <tr>
+                        <th class="p-2">Время</th>
+                        <th class="p-2">Напр.</th>
+                        <th class="p-2">Номер</th>
+                        <th class="p-2">Увер.</th>
+                        <th class="p-2">Источник</th>
+                        <th class="p-2">Дубль</th>
+                        <th class="p-2">Список</th>
+                        <th class="p-2">Оператор</th>
+                    </tr>
+                </thead>
+                <tbody id="journalRecognitionsBody"></tbody>
+            </table>
+        </div>
+        <p class="text-xs text-gray-500" id="journalRecognitionsMeta"></p>
+
+        <h3 class="text-lg font-semibold text-gray-800 pt-4 border-t">Открытия шлагбаума (имитация)</h3>
+        <div class="overflow-x-auto border border-gray-200 rounded-xl">
+            <table class="min-w-full text-sm text-left">
+                <thead class="bg-gray-100 text-gray-700">
+                    <tr>
+                        <th class="p-2">Время</th>
+                        <th class="p-2">Напр.</th>
+                        <th class="p-2">Номер</th>
+                        <th class="p-2">Оператор</th>
+                        <th class="p-2">Примечание</th>
+                    </tr>
+                </thead>
+                <tbody id="journalBarrierBody"></tbody>
+            </table>
+        </div>
+    </div>
+
+    <div id="tabLists" class="hidden space-y-6">
+        <h2 class="text-xl font-semibold text-gray-800">Белый и чёрный список</h2>
+        <p class="text-sm text-gray-500">Формат легкового номера: <b>БЦЦЦББ</b> (латиница A, B, E, K, M, H, O, P, C, T, Y, X). Чёрный список имеет приоритет при совпадении.</p>
+        <div class="grid md:grid-cols-2 gap-6">
+            <div class="border border-gray-200 rounded-xl p-4">
+                <h3 class="font-semibold text-green-800 mb-2">Белый список</h3>
+                <div class="flex gap-2 mb-2">
+                    <input type="text" id="whitePlateInput" placeholder="Напр. A111AA" class="flex-1 px-3 py-2 border rounded-lg text-sm">
+                    <input type="text" id="whiteNoteInput" placeholder="Примечание" class="w-32 px-2 py-2 border rounded-lg text-sm hidden md:block">
+                </div>
+                <button type="button" id="whiteAddBtn" class="w-full py-2 bg-green-600 text-white rounded-lg font-semibold text-sm mb-3">Добавить</button>
+                <ul id="whiteListUl" class="text-sm space-y-1 max-h-64 overflow-y-auto"></ul>
+            </div>
+            <div class="border border-gray-200 rounded-xl p-4">
+                <h3 class="font-semibold text-red-800 mb-2">Чёрный список</h3>
+                <div class="flex gap-2 mb-2">
+                    <input type="text" id="blackPlateInput" placeholder="Напр. B222BB" class="flex-1 px-3 py-2 border rounded-lg text-sm">
+                    <input type="text" id="blackNoteInput" placeholder="Примечание" class="w-32 px-2 py-2 border rounded-lg text-sm hidden md:block">
+                </div>
+                <button type="button" id="blackAddBtn" class="w-full py-2 bg-red-600 text-white rounded-lg font-semibold text-sm mb-3">Добавить</button>
+                <ul id="blackListUl" class="text-sm space-y-1 max-h-64 overflow-y-auto"></ul>
+            </div>
+        </div>
+    </div>
+
 </div>
+</div><!-- /armApp -->
 
 <script>
     const resultsContainer = document.getElementById('resultsContainer');
@@ -263,6 +386,18 @@
     const ipCameraPathInput = document.getElementById('ipCameraPathInput');
     const applyIpPresetButton = document.getElementById('applyIpPresetButton');
 
+    const loginPanel = document.getElementById('loginPanel');
+    const armApp = document.getElementById('armApp');
+    const loginUsername = document.getElementById('loginUsername');
+    const loginPassword = document.getElementById('loginPassword');
+    const loginSubmitButton = document.getElementById('loginSubmitButton');
+    const loginError = document.getElementById('loginError');
+    const logoutButton = document.getElementById('logoutButton');
+    const operatorName = document.getElementById('operatorName');
+    const listStatusHint = document.getElementById('listStatusHint');
+    const tabKpp = document.getElementById('tabKpp');
+    const tabJournal = document.getElementById('tabJournal');
+    const tabLists = document.getElementById('tabLists');
 
     function pageDirectoryBaseHref() {
         const u = new URL(window.location.href);
@@ -281,48 +416,98 @@
     const API_FROM_QUERY = new URLSearchParams(window.location.search).get('api');
     const API_FROM_META = document.querySelector('meta[name="ocr-api-base"]')?.getAttribute('content')?.trim();
 
+    let API_BASE;
     let OCR_SERVICE_URL;
     let HEALTH_CHECK_URL;
     let IP_CAMERA_PROCESS_URL;
     let LOCAL_CAMERA_PROCESS_URL;
     let BARRIER_OPEN_URL;
+    let AUTH_LOGIN_URL;
+    let AUTH_LOGOUT_URL;
+    let AUTH_ME_URL;
+    let JOURNAL_REC_URL;
+    let JOURNAL_BARRIER_URL;
+    let LIST_WHITE_URL;
+    let LIST_BLACK_URL;
+
     const q = API_FROM_QUERY && API_FROM_QUERY.trim();
     const m = API_FROM_META && API_FROM_META.trim();
     if (q) {
-        const base = q.replace(/\/$/, '');
-        OCR_SERVICE_URL = `${base}/process`;
-        HEALTH_CHECK_URL = `${base}/health`;
-        IP_CAMERA_PROCESS_URL = `${base}/process_ip_camera`;
-        LOCAL_CAMERA_PROCESS_URL = `${base}/process_local_camera`;
-        BARRIER_OPEN_URL = `${base}/barrier/open`;
+        API_BASE = q.replace(/\/$/, '');
     } else if (m) {
-        const base = m.replace(/\/$/, '');
-        OCR_SERVICE_URL = `${base}/process`;
-        HEALTH_CHECK_URL = `${base}/health`;
-        IP_CAMERA_PROCESS_URL = `${base}/process_ip_camera`;
-        LOCAL_CAMERA_PROCESS_URL = `${base}/process_local_camera`;
-        BARRIER_OPEN_URL = `${base}/barrier/open`;
+        API_BASE = m.replace(/\/$/, '');
     } else if (window.location.protocol === 'file:') {
-        const base = 'http://127.0.0.1:3020';
-        OCR_SERVICE_URL = `${base}/process`;
-        HEALTH_CHECK_URL = `${base}/health`;
-        IP_CAMERA_PROCESS_URL = `${base}/process_ip_camera`;
-        LOCAL_CAMERA_PROCESS_URL = `${base}/process_local_camera`;
-        BARRIER_OPEN_URL = `${base}/barrier/open`;
+        API_BASE = 'http://127.0.0.1:3020';
     } else {
         const dir = pageDirectoryBaseHref();
-        HEALTH_CHECK_URL = new URL('health', dir).href;
-        OCR_SERVICE_URL = new URL('process', dir).href;
-        IP_CAMERA_PROCESS_URL = new URL('process_ip_camera', dir).href;
-        LOCAL_CAMERA_PROCESS_URL = new URL('process_local_camera', dir).href;
-        BARRIER_OPEN_URL = new URL('barrier/open', dir).href;
+        API_BASE = new URL('.', dir).href.replace(/\/$/, '');
     }
+    OCR_SERVICE_URL = `${API_BASE}/process`;
+    HEALTH_CHECK_URL = `${API_BASE}/health`;
+    IP_CAMERA_PROCESS_URL = `${API_BASE}/process_ip_camera`;
+    LOCAL_CAMERA_PROCESS_URL = `${API_BASE}/process_local_camera`;
+    BARRIER_OPEN_URL = `${API_BASE}/barrier/open`;
+    AUTH_LOGIN_URL = `${API_BASE}/api/auth/login`;
+    AUTH_LOGOUT_URL = `${API_BASE}/api/auth/logout`;
+    AUTH_ME_URL = `${API_BASE}/api/auth/me`;
+    JOURNAL_REC_URL = `${API_BASE}/api/journal/recognitions`;
+    JOURNAL_BARRIER_URL = `${API_BASE}/api/journal/barrier`;
+    LIST_WHITE_URL = `${API_BASE}/api/lists/white`;
+    LIST_BLACK_URL = `${API_BASE}/api/lists/black`;
 
     let currentStream = null;
     let ipLiveTimer = null;
     let ipLiveInFlight = false;
     let autoCaptureDirectInterval = null;
     let directAutoCaptureInFlight = false;
+    let lastPlateBase = '';
+    let lastPlateFull = '';
+
+    function apiFetch(url, options = {}) {
+        const merged = {
+            credentials: 'include',
+            cache: 'no-store',
+            ...options,
+            headers: { ...(options.headers || {}) },
+        };
+        return fetch(url, merged);
+    }
+
+    function getDirection() {
+        const r = document.querySelector('input[name="direction"]:checked');
+        return r ? r.value : 'entry';
+    }
+
+    function setListStatusBadge(status) {
+        if (!listStatusHint) return;
+        if (!status || status === 'none') {
+            listStatusHint.classList.add('hidden');
+            listStatusHint.textContent = '';
+            return;
+        }
+        listStatusHint.classList.remove('hidden');
+        if (status === 'blacklist') {
+            listStatusHint.className = 'p-3 rounded-lg mb-4 text-sm font-medium border border-red-300 bg-red-50 text-red-900';
+            listStatusHint.textContent = 'Номер в чёрном списке — доступ не рекомендуется (решение за оператором).';
+        } else if (status === 'whitelist') {
+            listStatusHint.className = 'p-3 rounded-lg mb-4 text-sm font-medium border border-green-300 bg-green-50 text-green-900';
+            listStatusHint.textContent = 'Номер в белом списке.';
+        } else {
+            listStatusHint.classList.add('hidden');
+            listStatusHint.textContent = '';
+        }
+    }
+
+    function showLoginView() {
+        loginPanel.classList.remove('hidden');
+        armApp.classList.add('hidden');
+    }
+
+    function showArmView(username) {
+        loginPanel.classList.add('hidden');
+        armApp.classList.remove('hidden');
+        if (operatorName) operatorName.textContent = username || '—';
+    }
 
     function displayError(message) {
         errorContainer.classList.remove('hidden');
@@ -359,7 +544,7 @@
     async function checkServiceStatus() {
         try {
             console.debug("[OCR] health check", { url: HEALTH_CHECK_URL, origin: window.location.origin });
-            const response = await fetch(HEALTH_CHECK_URL, { method: 'GET', mode: 'cors', cache: 'no-store' });
+            const response = await apiFetch(HEALTH_CHECK_URL, { method: 'GET', mode: 'cors' });
             console.debug("[OCR] health response", { ok: response.ok, status: response.status });
             
             if (response.ok) { 
@@ -399,14 +584,17 @@
             return;
         }
 
-        const payload = { image_data: base64Image };
+        const payload = {
+            image_data: base64Image,
+            direction: getDirection(),
+            source: loadingIndicator === loadingIndicatorCapture ? 'browser' : 'upload',
+        };
 
         try {
             console.debug("[OCR] process request", { url: OCR_SERVICE_URL, payloadChars: base64Image?.length });
-            const response = await fetch(OCR_SERVICE_URL, {
+            const response = await apiFetch(OCR_SERVICE_URL, {
                 method: 'POST',
                 mode: 'cors',
-                cache: 'no-store',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(payload)
             });
@@ -415,6 +603,10 @@
             const result = await response.json();
             console.debug("[OCR] process json", result);
             
+            if (response.status === 401) {
+                showLoginView();
+                throw new Error('Сессия истекла или не выполнен вход. Войдите снова.');
+            }
             if (!response.ok) {
                 throw new Error(result.error || `Ошибка бэкенда! Статус: ${response.status}`);
             }
@@ -424,10 +616,14 @@
             explanationOutput.textContent = result.model_explanation || result.confidence_explanation || 'Нет дополнительного объяснения.';
             ocrLogOutput.textContent = result.ocr_log || 'Лог OCR отсутствует.';
             duplicatePlateHint.classList.toggle('hidden', !result.is_duplicate_recent);
-            
+            setListStatusBadge(result.list_status || 'none');
             if (result.plate) {
+                lastPlateBase = (result.plate_base || result.plate || '').toUpperCase();
+                lastPlateFull = (result.plate_full || result.plate || '').toUpperCase();
                 noPlateWarning.classList.add('hidden');
             } else {
+                lastPlateBase = '';
+                lastPlateFull = '';
                 noPlateWarning.classList.remove('hidden');
                 duplicatePlateHint.classList.add('hidden');
             }
@@ -549,13 +745,16 @@
                 return;
             }
 
-            const response = await fetch(IP_CAMERA_PROCESS_URL, {
+            const response = await apiFetch(IP_CAMERA_PROCESS_URL, {
                 method: 'POST',
                 mode: 'cors',
-                cache: 'no-store',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ camera_url: cameraUrl })
+                body: JSON.stringify({ camera_url: cameraUrl, direction: getDirection() })
             });
+            if (response.status === 401) {
+                showLoginView();
+                throw new Error('Нужен вход в систему.');
+            }
             if (!response.ok) {
                 const errBody = await response.json().catch(() => ({}));
                 throw new Error(errBody.error || `Ошибка IP-камеры: ${response.status}`);
@@ -568,9 +767,14 @@
             ocrLogOutput.textContent = result.ocr_log || 'Лог OCR отсутствует.';
             imagePreview.src = result.preview_data_url || '';
             duplicatePlateHint.classList.toggle('hidden', !result.is_duplicate_recent);
+            setListStatusBadge(result.list_status || 'none');
             if (result.plate) {
+                lastPlateBase = (result.plate_base || result.plate || '').toUpperCase();
+                lastPlateFull = (result.plate_full || '').toUpperCase();
                 noPlateWarning.classList.add('hidden');
             } else {
+                lastPlateBase = '';
+                lastPlateFull = '';
                 noPlateWarning.classList.remove('hidden');
                 duplicatePlateHint.classList.add('hidden');
             }
@@ -599,13 +803,16 @@
             const cameraIndex = Math.max(0, Number(localCameraIndexInput.value) || 0);
             localCameraIndexInput.value = String(cameraIndex);
 
-            const response = await fetch(LOCAL_CAMERA_PROCESS_URL, {
+            const response = await apiFetch(LOCAL_CAMERA_PROCESS_URL, {
                 method: 'POST',
                 mode: 'cors',
-                cache: 'no-store',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ camera_index: cameraIndex })
+                body: JSON.stringify({ camera_index: cameraIndex, direction: getDirection() })
             });
+            if (response.status === 401) {
+                showLoginView();
+                throw new Error('Нужен вход в систему.');
+            }
             if (!response.ok) {
                 const errBody = await response.json().catch(() => ({}));
                 throw new Error(errBody.error || `Ошибка локальной камеры: ${response.status}`);
@@ -618,9 +825,14 @@
             ocrLogOutput.textContent = result.ocr_log || 'Лог OCR отсутствует.';
             imagePreview.src = result.preview_data_url || '';
             duplicatePlateHint.classList.toggle('hidden', !result.is_duplicate_recent);
+            setListStatusBadge(result.list_status || 'none');
             if (result.plate) {
+                lastPlateBase = (result.plate_base || result.plate || '').toUpperCase();
+                lastPlateFull = (result.plate_full || '').toUpperCase();
                 noPlateWarning.classList.add('hidden');
             } else {
+                lastPlateBase = '';
+                lastPlateFull = '';
                 noPlateWarning.classList.remove('hidden');
                 duplicatePlateHint.classList.add('hidden');
             }
@@ -671,8 +883,253 @@
         tickIpLive();
         ipLiveTimer = setInterval(tickIpLive, intervalMs);
     }
+
+    function fmtTs(ts) {
+        if (ts == null) return '—';
+        try {
+            return new Date(Number(ts) * 1000).toLocaleString('ru-RU');
+        } catch (e) {
+            return String(ts);
+        }
+    }
+
+    async function checkSessionOnLoad() {
+        try {
+            const r = await apiFetch(AUTH_ME_URL, { method: 'GET', mode: 'cors' });
+            const j = await r.json().catch(() => ({}));
+            if (j.authenticated) {
+                showArmView(j.username);
+                return true;
+            }
+        } catch (e) {
+            console.warn('auth me failed', e);
+        }
+        showLoginView();
+        return false;
+    }
+
+    async function loadJournalTables() {
+        const q = (document.getElementById('journalSearch')?.value || '').trim();
+        const sort = document.getElementById('journalSort')?.value || 'created_at';
+        const order = document.getElementById('journalOrder')?.value || 'desc';
+        const recBody = document.getElementById('journalRecognitionsBody');
+        const meta = document.getElementById('journalRecognitionsMeta');
+        const barBody = document.getElementById('journalBarrierBody');
+        if (!recBody) return;
+
+        const recUrl = `${JOURNAL_REC_URL}?sort=${encodeURIComponent(sort)}&order=${encodeURIComponent(order)}&limit=200&q=${encodeURIComponent(q)}`;
+        const rr = await apiFetch(recUrl, { method: 'GET', mode: 'cors' });
+        if (rr.status === 401) {
+            showLoginView();
+            return;
+        }
+        const data = await rr.json().catch(() => ({ items: [], total: 0 }));
+        recBody.innerHTML = '';
+        (data.items || []).forEach((row) => {
+            const tr = document.createElement('tr');
+            tr.className = 'border-t border-gray-100';
+            const td0 = document.createElement('td');
+            td0.className = 'p-2 whitespace-nowrap';
+            td0.textContent = fmtTs(row.created_at);
+            const td1 = document.createElement('td');
+            td1.className = 'p-2';
+            td1.textContent = row.direction === 'exit' ? 'выезд' : 'въезд';
+            const td2 = document.createElement('td');
+            td2.className = 'p-2 font-mono';
+            td2.textContent = ((row.plate_full || row.plate_base || '') + '').toUpperCase();
+            const td3 = document.createElement('td');
+            td3.className = 'p-2';
+            td3.textContent = row.confidence != null ? Number(row.confidence).toFixed(2) : '—';
+            const td4 = document.createElement('td');
+            td4.className = 'p-2';
+            td4.textContent = row.source || '';
+            const td5 = document.createElement('td');
+            td5.className = 'p-2';
+            td5.textContent = row.is_duplicate_recent ? 'да' : 'нет';
+            const td6 = document.createElement('td');
+            td6.className = 'p-2';
+            td6.textContent = row.list_status || '';
+            const td7 = document.createElement('td');
+            td7.className = 'p-2';
+            td7.textContent = row.operator || '';
+            tr.append(td0, td1, td2, td3, td4, td5, td6, td7);
+            recBody.appendChild(tr);
+        });
+        if (meta) meta.textContent = `Всего записей (по фильтру): ${data.total ?? (data.items || []).length}`;
+
+        const br = await apiFetch(
+            `${JOURNAL_BARRIER_URL}?order=desc&limit=100&q=${encodeURIComponent(q)}`,
+            { method: 'GET', mode: 'cors' }
+        );
+        const bd = await br.json().catch(() => ({ items: [] }));
+        if (barBody) {
+            barBody.innerHTML = '';
+            (bd.items || []).forEach((row) => {
+                const tr = document.createElement('tr');
+                tr.className = 'border-t border-gray-100';
+                const c0 = document.createElement('td');
+                c0.className = 'p-2 whitespace-nowrap';
+                c0.textContent = fmtTs(row.created_at);
+                const c1 = document.createElement('td');
+                c1.className = 'p-2';
+                c1.textContent = row.direction === 'exit' ? 'выезд' : 'въезд';
+                const c2 = document.createElement('td');
+                c2.className = 'p-2 font-mono';
+                c2.textContent = ((row.plate_full || row.plate_base || '—') + '').toUpperCase();
+                const c3 = document.createElement('td');
+                c3.className = 'p-2';
+                c3.textContent = row.operator || '';
+                const c4 = document.createElement('td');
+                c4.className = 'p-2 text-xs';
+                c4.textContent = row.note || '';
+                tr.append(c0, c1, c2, c3, c4);
+                barBody.appendChild(tr);
+            });
+        }
+    }
+
+    async function loadPlateLists() {
+        const whiteUl = document.getElementById('whiteListUl');
+        const blackUl = document.getElementById('blackListUl');
+        const rw = await apiFetch(LIST_WHITE_URL, { method: 'GET', mode: 'cors' });
+        const rb = await apiFetch(LIST_BLACK_URL, { method: 'GET', mode: 'cors' });
+        if (rw.status === 401 || rb.status === 401) {
+            showLoginView();
+            return;
+        }
+        const wj = await rw.json().catch(() => ({ items: [] }));
+        const bj = await rb.json().catch(() => ({ items: [] }));
+
+        function fillList(ul, items) {
+            if (!ul) return;
+            ul.innerHTML = '';
+            (items || []).forEach((it) => {
+                const li = document.createElement('li');
+                li.className = 'flex justify-between items-center gap-2 border border-gray-100 rounded px-2 py-1';
+                const left = document.createElement('span');
+                left.className = 'font-mono';
+                left.textContent = it.plate_base;
+                const mid = document.createElement('span');
+                mid.className = 'text-xs text-gray-500 truncate';
+                mid.textContent = it.note || '';
+                const del = document.createElement('button');
+                del.type = 'button';
+                del.className = 'text-red-600 text-xs shrink-0';
+                del.textContent = 'Удал.';
+                del.addEventListener('click', async () => {
+                    const resp = await apiFetch(`${API_BASE}/api/lists/${it.id}`, { method: 'DELETE', mode: 'cors' });
+                    if (resp.status === 401) {
+                        showLoginView();
+                        return;
+                    }
+                    if (resp.ok) await loadPlateLists();
+                });
+                li.append(left, mid, del);
+                ul.appendChild(li);
+            });
+        }
+        fillList(whiteUl, wj.items);
+        fillList(blackUl, bj.items);
+    }
+
+    function setActiveTab(name) {
+        document.querySelectorAll('.tab-btn').forEach((b) => {
+            const on = b.getAttribute('data-tab') === name;
+            b.classList.toggle('bg-indigo-600', on);
+            b.classList.toggle('text-white', on);
+            b.classList.toggle('text-gray-600', !on);
+            b.classList.toggle('hover:bg-gray-100', !on);
+        });
+        tabKpp.classList.toggle('hidden', name !== 'kpp');
+        tabJournal.classList.toggle('hidden', name !== 'journal');
+        tabLists.classList.toggle('hidden', name !== 'lists');
+        if (name === 'journal') void loadJournalTables();
+        if (name === 'lists') void loadPlateLists();
+    }
     
     // --- EVENT LISTENERS ---
+    document.querySelectorAll('.tab-btn').forEach((b) => {
+        b.addEventListener('click', () => setActiveTab(b.getAttribute('data-tab')));
+    });
+
+    loginSubmitButton.addEventListener('click', async () => {
+        loginError.classList.add('hidden');
+        const u = loginUsername.value.trim();
+        const p = loginPassword.value;
+        try {
+            const r = await apiFetch(AUTH_LOGIN_URL, {
+                method: 'POST',
+                mode: 'cors',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ username: u, password: p }),
+            });
+            const j = await r.json().catch(() => ({}));
+            if (!r.ok) {
+                loginError.textContent = j.error || 'Ошибка входа';
+                loginError.classList.remove('hidden');
+                return;
+            }
+            showArmView(j.username);
+            await checkServiceStatus();
+        } catch (e) {
+            loginError.textContent = e.message || 'Сеть недоступна';
+            loginError.classList.remove('hidden');
+        }
+    });
+
+    logoutButton.addEventListener('click', async () => {
+        try {
+            await apiFetch(AUTH_LOGOUT_URL, { method: 'POST', mode: 'cors' });
+        } catch (e) { /* ignore */ }
+        showLoginView();
+    });
+
+    const journalRefreshBtn = document.getElementById('journalRefreshBtn');
+    if (journalRefreshBtn) {
+        journalRefreshBtn.addEventListener('click', () => void loadJournalTables());
+    }
+
+    const whiteAddBtn = document.getElementById('whiteAddBtn');
+    const blackAddBtn = document.getElementById('blackAddBtn');
+    if (whiteAddBtn) {
+        whiteAddBtn.addEventListener('click', async () => {
+            const plate = document.getElementById('whitePlateInput').value;
+            const note = document.getElementById('whiteNoteInput')?.value || '';
+            const r = await apiFetch(LIST_WHITE_URL, {
+                method: 'POST',
+                mode: 'cors',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ plate, note }),
+            });
+            const j = await r.json().catch(() => ({}));
+            if (!r.ok) {
+                alert(j.error || 'Не удалось добавить');
+                return;
+            }
+            document.getElementById('whitePlateInput').value = '';
+            await loadPlateLists();
+        });
+    }
+    if (blackAddBtn) {
+        blackAddBtn.addEventListener('click', async () => {
+            const plate = document.getElementById('blackPlateInput').value;
+            const note = document.getElementById('blackNoteInput')?.value || '';
+            const r = await apiFetch(LIST_BLACK_URL, {
+                method: 'POST',
+                mode: 'cors',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ plate, note }),
+            });
+            const j = await r.json().catch(() => ({}));
+            if (!r.ok) {
+                alert(j.error || 'Не удалось добавить');
+                return;
+            }
+            document.getElementById('blackPlateInput').value = '';
+            await loadPlateLists();
+        });
+    }
+
     startCameraButton.addEventListener('click', startVideoStream);
     captureAndProcessButton.addEventListener('click', () => void captureFrame());
     if (autoCaptureDirectCheckbox) {
@@ -754,18 +1211,26 @@
         barrierStatusText.textContent = 'Отправка команды...';
         openBarrierButton.disabled = true;
         try {
-            const response = await fetch(BARRIER_OPEN_URL, {
+            const response = await apiFetch(BARRIER_OPEN_URL, {
                 method: 'POST',
                 mode: 'cors',
-                cache: 'no-store',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ reason: 'manual_ui' })
+                body: JSON.stringify({
+                    direction: getDirection(),
+                    plate_base: lastPlateBase || null,
+                    plate_full: lastPlateFull || null,
+                    note: 'manual_ui',
+                })
             });
+            if (response.status === 401) {
+                showLoginView();
+                throw new Error('Нужен вход в систему.');
+            }
             const result = await response.json().catch(() => ({}));
             if (!response.ok || !result.ok) {
                 throw new Error(result.error || `Ошибка: ${response.status}`);
             }
-            barrierStatusText.textContent = 'Шлагбаум открыт (заглушка API).';
+            barrierStatusText.textContent = result.message || 'Событие записано в журнал (имитация).';
         } catch (err) {
             barrierStatusText.textContent = 'Не удалось открыть шлагбаум.';
             displayError(`Ошибка команды шлагбаума: ${err.message}`);
@@ -774,9 +1239,13 @@
         }
     });
     
-    // Initial service check and periodic checks
-    window.onload = checkServiceStatus;
-    setInterval(checkServiceStatus, 5000);
+    window.addEventListener('load', async () => {
+        const ok = await checkSessionOnLoad();
+        if (ok) await checkServiceStatus();
+    });
+    setInterval(async () => {
+        if (!armApp.classList.contains('hidden')) await checkServiceStatus();
+    }, 5000);
 
 </script>
 </body>
