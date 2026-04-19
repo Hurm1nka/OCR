@@ -425,6 +425,16 @@ def recognition_sidecar(plate, data):
     return direction, visit_id, dur_sec, dh, direction_label_ru(direction), exit_applied
 
 
+def duplicate_flag_for_report(is_duplicate_recent, auto_direction):
+    """
+    OCR-антидубликат по времени не должен помечать осмысловой выезд после заезда
+    (один и тот же номер в окне dedup — это норма для въезд/выезд).
+    """
+    if auto_direction in ("exit", "exit_no_entry"):
+        return False
+    return is_duplicate_recent
+
+
 def attach_ocr_meta(res, is_duplicate_recent, list_status):
     res["is_duplicate_recent"] = is_duplicate_recent
     res["dedup_window_seconds"] = DEDUP_WINDOW_SECONDS
@@ -851,7 +861,7 @@ def index_page():
 def process_data():
     data = request.get_json(silent=True) or {}
     raw_src = (data.get("source") or "upload").strip().lower()[:32]
-    if raw_src not in ("browser", "upload", "ip_camera"):
+    if raw_src not in ("browser", "browser_motion", "upload", "ip_camera"):
         raw_src = "upload"
     base64_img = data.get('image_data')
     
@@ -873,6 +883,7 @@ def process_data():
         exit_wo_applied = False
         if plate:
             auto_dir, visit_id, dur_sec, dur_human, dir_label, exit_wo_applied = recognition_sidecar(plate, data)
+            dup_report = duplicate_flag_for_report(is_duplicate_recent, auto_dir)
             log_recognition_event(
                 session["user_id"],
                 auto_dir,
@@ -880,7 +891,7 @@ def process_data():
                 region,
                 conf,
                 raw_src,
-                is_duplicate_recent,
+                dup_report,
                 list_status,
                 visit_id=visit_id,
             )
@@ -901,7 +912,7 @@ def process_data():
                 "stay_duration_human": dur_human,
                 "exit_without_entry_applied": exit_wo_applied,
             }
-            attach_ocr_meta(res, is_duplicate_recent, list_status)
+            attach_ocr_meta(res, duplicate_flag_for_report(is_duplicate_recent, auto_dir), list_status)
         else:
             res = {
                 "plate": "",
@@ -942,6 +953,7 @@ def process_ip_camera():
         exit_wo_applied = False
         if plate:
             auto_dir, visit_id, dur_sec, dur_human, dir_label, exit_wo_applied = recognition_sidecar(plate, data)
+            dup_report = duplicate_flag_for_report(is_duplicate_recent, auto_dir)
             log_recognition_event(
                 session["user_id"],
                 auto_dir,
@@ -949,7 +961,7 @@ def process_ip_camera():
                 region,
                 conf,
                 "ip_camera",
-                is_duplicate_recent,
+                dup_report,
                 list_status,
                 visit_id=visit_id,
             )
@@ -971,7 +983,11 @@ def process_ip_camera():
             "stay_duration_human": dur_human,
             "exit_without_entry_applied": exit_wo_applied,
         }
-        attach_ocr_meta(res, is_duplicate_recent, list_status)
+        attach_ocr_meta(
+            res,
+            duplicate_flag_for_report(is_duplicate_recent, auto_dir) if plate else is_duplicate_recent,
+            list_status,
+        )
         return jsonify(res), 200
     except Exception as e:
         logger.exception("process_ip_camera: failed: %s", e)
@@ -1088,6 +1104,7 @@ def api_manual_visit():
     is_duplicate_recent = mark_plate_event_and_check_duplicate(plate)
     list_status = arm_db.resolve_list_status(plate)
     auto_dir, visit_id, dur_sec, dur_human, dir_label, exit_wo_applied = recognition_sidecar(plate, sidecar_data)
+    dup_report = duplicate_flag_for_report(is_duplicate_recent, auto_dir)
     log_recognition_event(
         session["user_id"],
         auto_dir,
@@ -1095,7 +1112,7 @@ def api_manual_visit():
         region,
         1.0,
         "manual_guard",
-        is_duplicate_recent,
+        dup_report,
         list_status,
         visit_id=visit_id,
     )
@@ -1116,7 +1133,7 @@ def api_manual_visit():
         "stay_duration_human": dur_human,
         "exit_without_entry_applied": exit_wo_applied,
     }
-    attach_ocr_meta(res, is_duplicate_recent, list_status)
+    attach_ocr_meta(res, dup_report, list_status)
     return jsonify(res), 200
 
 

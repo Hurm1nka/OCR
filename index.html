@@ -92,6 +92,7 @@
         
         <video id="videoElement" autoplay playsinline class="w-full max-h-96 rounded-lg bg-black object-cover hidden"></video>
         <canvas id="canvasElement"></canvas>
+        <canvas id="motionProbeCanvas" width="160" height="90" class="hidden" aria-hidden="true"></canvas>
 
         <button id="startCameraButton" class="w-full px-4 py-3 bg-green-600 text-white font-semibold rounded-xl shadow-lg hover:bg-green-700 transition duration-300 mt-4">
             <span id="startStopText">Запустить Камеру</span>
@@ -104,14 +105,17 @@
             <div id="loadingIndicatorCapture" class="loader w-5 h-5 border-2 border-white border-solid rounded-full hidden ml-2"></div>
         </button>
 
-        <div class="mt-4 rounded-lg border border-gray-200 bg-white p-3">
+        <div class="mt-4 rounded-lg border border-gray-200 bg-white p-3 space-y-2">
             <label class="flex items-start gap-3 cursor-pointer">
-                <input type="checkbox" id="autoCaptureDirectCheckbox" class="mt-1 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500">
+                <input type="checkbox" id="motionAutoCheckbox" class="mt-1 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500">
                 <span class="text-sm text-gray-700">
-                    <span class="font-semibold text-gray-800">Автосъём каждые 5 с</span>
-                    — пока камера включена, кадр снимается и отправляется на распознавание каждые 5 секунд.
+                    <span class="font-semibold text-gray-800">Авто после движения</span>
+                    — при появлении движения в кадре ждём короткую стабилизацию (машина остановилась), затем один снимок в полном разрешении на OCR (максимально чёткий номер). Повтор не чаще чем раз в ~12 с.
                 </span>
             </label>
+            <p id="motionStatusLine" class="text-xs text-indigo-800 min-h-[1rem]"></p>
+            <p id="motionNotifyLine" class="text-xs text-green-800 font-medium min-h-[1rem]"></p>
+            <p class="text-xs text-gray-500">Оповещения браузера: при первом включении галочки можно разрешить уведомления — придёт сообщение, когда номер найден или не найден.</p>
         </div>
     </div>
 
@@ -393,7 +397,8 @@
     const startStopText = document.getElementById('startStopText');
     const captureAndProcessButton = document.getElementById('captureAndProcessButton');
     const loadingIndicatorCapture = document.getElementById('loadingIndicatorCapture');
-    const autoCaptureDirectCheckbox = document.getElementById('autoCaptureDirectCheckbox');
+    const motionAutoCheckbox = document.getElementById('motionAutoCheckbox');
+    const motionProbeCanvas = document.getElementById('motionProbeCanvas');
 
     const imageUpload = document.getElementById('imageUpload');
     const processFileButton = document.getElementById('processFileButton');
@@ -485,8 +490,20 @@
     let currentStream = null;
     let ipLiveTimer = null;
     let ipLiveInFlight = false;
-    let autoCaptureDirectInterval = null;
-    let directAutoCaptureInFlight = false;
+    const MOTION_SAMPLE_W = 160;
+    const MOTION_SAMPLE_H = 90;
+    const MOTION_DIFF_START = 11;
+    const MOTION_DIFF_STABLE = 3.8;
+    const MOTION_STABLE_FRAMES = 14;
+    const MOTION_COOLDOWN_MS = 12000;
+    let motionRafId = null;
+    let motionPrevGray = null;
+    let motionPhase = 'idle';
+    let motionStableCount = 0;
+    let motionBusy = false;
+    let motionCooldownUntil = 0;
+    let motionLastSampleTs = 0;
+    let motionNotifyClearTimer = null;
     let lastPlateBase = '';
     let lastPlateFull = '';
 
@@ -748,7 +765,7 @@
         return false;
     }
     
-    async function processImage(base64Image, loadingIndicator) {
+    async function processImage(base64Image, loadingIndicator, options = {}) {
         clearError();
         setLoadingState(true, loadingIndicator);
         resultsContainer.classList.add('hidden');
@@ -758,12 +775,14 @@
         if (!isServiceReady) {
             displayError("Локальный сервис OCR не запущен. Пожалуйста, запустите Docker-контейнер.");
             setLoadingState(false, loadingIndicator);
-            return;
+            return null;
         }
 
+        const src = options.sourceOverride
+            || (loadingIndicator === loadingIndicatorCapture ? 'browser' : 'upload');
         const payload = {
             image_data: base64Image,
-            source: loadingIndicator === loadingIndicatorCapture ? 'browser' : 'upload',
+            source: src,
             ...ocrPayloadFlags(),
         };
 
@@ -789,46 +808,170 @@
             }
             
             applyKppResultFromApi(result, undefined);
+            return result;
 
         } catch (e) {
             console.error("Local Service Call failed:", e);
             displayError(`Не удалось выполнить анализ изображения: ${e.message}.`);
+            return null;
         } finally {
             setLoadingState(false, loadingIndicator);
         }
     }
 
-    function stopDirectAutoCapture() {
-        if (autoCaptureDirectInterval) {
-            clearInterval(autoCaptureDirectInterval);
-            autoCaptureDirectInterval = null;
-        }
+    function setMotionStatusLine(text) {
+        const el = document.getElementById('motionStatusLine');
+        if (el) el.textContent = text || '';
     }
 
-    async function tickDirectAutoCapture() {
-        if (!autoCaptureDirectCheckbox?.checked || !currentStream) return;
-        if (directAutoCaptureInFlight) return;
-        if (!videoElement.videoWidth || videoElement.paused || videoElement.ended) return;
-        directAutoCaptureInFlight = true;
+    function setMotionNotifyLine(text) {
+        const el = document.getElementById('motionNotifyLine');
+        if (el) el.textContent = text || '';
+    }
+
+    function notifyBrowserOcr(title, body) {
+        if (!('Notification' in window) || Notification.permission !== 'granted') return;
         try {
-            await captureFrame();
-        } finally {
-            directAutoCaptureInFlight = false;
+            new Notification(title, { body });
+        } catch (e) { /* ignore */ }
+    }
+
+    function stopMotionWatch() {
+        if (motionRafId != null) {
+            cancelAnimationFrame(motionRafId);
+            motionRafId = null;
+        }
+        motionPrevGray = null;
+        motionPhase = 'idle';
+        motionStableCount = 0;
+        motionLastSampleTs = 0;
+        setMotionStatusLine('');
+    }
+
+    function startMotionWatch() {
+        stopMotionWatch();
+        if (!motionAutoCheckbox?.checked || !currentStream) return;
+        motionCooldownUntil = 0;
+        motionPhase = 'idle';
+        motionRafId = requestAnimationFrame(motionTick);
+    }
+
+    function grayFrameFromVideo() {
+        const c = motionProbeCanvas;
+        if (!c) return null;
+        const ctx = c.getContext('2d', { willReadFrequently: true });
+        ctx.drawImage(videoElement, 0, 0, MOTION_SAMPLE_W, MOTION_SAMPLE_H);
+        const img = ctx.getImageData(0, 0, MOTION_SAMPLE_W, MOTION_SAMPLE_H);
+        const gray = new Uint8Array((img.data.length / 4) | 0);
+        let j = 0;
+        for (let i = 0; i < img.data.length; i += 4) {
+            gray[j++] = (img.data[i] * 0.3 + img.data[i + 1] * 0.59 + img.data[i + 2] * 0.11) | 0;
+        }
+        return gray;
+    }
+
+    function meanAbsDiffGray(a, b) {
+        const step = 6;
+        let s = 0;
+        let n = 0;
+        for (let i = 0; i < a.length; i += step) {
+            s += Math.abs(a[i] - b[i]);
+            n++;
+        }
+        return n ? s / n : 0;
+    }
+
+    function motionTick(ts) {
+        if (!motionAutoCheckbox?.checked || !currentStream || videoElement.paused || videoElement.ended) {
+            motionRafId = null;
+            return;
+        }
+        motionRafId = requestAnimationFrame(motionTick);
+        if (motionBusy || ts < motionCooldownUntil) return;
+        if (ts - motionLastSampleTs < 110) return;
+        motionLastSampleTs = ts;
+
+        const w = videoElement.videoWidth;
+        const h = videoElement.videoHeight;
+        if (!w || !h) return;
+
+        const gray = grayFrameFromVideo();
+        if (!gray) return;
+        if (!motionPrevGray) {
+            motionPrevGray = gray;
+            return;
+        }
+        const d = meanAbsDiffGray(gray, motionPrevGray);
+        motionPrevGray = gray;
+
+        if (motionPhase === 'idle') {
+            if (d > MOTION_DIFF_START) {
+                motionPhase = 'active';
+                setMotionStatusLine('Движение в кадре — ждём остановки для чёткого снимка…');
+            }
+        } else if (motionPhase === 'active') {
+            if (d > MOTION_DIFF_START * 0.88) {
+                motionStableCount = 0;
+            } else if (d < MOTION_DIFF_STABLE) {
+                motionStableCount++;
+                if (motionStableCount >= MOTION_STABLE_FRAMES) {
+                    motionPhase = 'idle';
+                    motionStableCount = 0;
+                    void runMotionStabilizedOcr();
+                }
+            } else {
+                motionStableCount = 0;
+            }
         }
     }
 
-    function startDirectAutoCaptureInterval() {
-        stopDirectAutoCapture();
-        if (!autoCaptureDirectCheckbox?.checked || !currentStream) return;
-        void tickDirectAutoCapture();
-        autoCaptureDirectInterval = setInterval(() => void tickDirectAutoCapture(), 5000);
+    async function runMotionStabilizedOcr() {
+        if (motionBusy || !currentStream) return;
+        motionBusy = true;
+        if (motionRafId != null) {
+            cancelAnimationFrame(motionRafId);
+            motionRafId = null;
+        }
+        setMotionStatusLine('Стабилизация: съёмка и отправка на OCR…');
+        try {
+            const width = videoElement.videoWidth;
+            const height = videoElement.videoHeight;
+            if (!width || !height) return;
+            canvasElement.width = width;
+            canvasElement.height = height;
+            const ctx = canvasElement.getContext('2d');
+            ctx.drawImage(videoElement, 0, 0, width, height);
+            const dataURL = canvasElement.toDataURL('image/jpeg', 0.92);
+            const base64Image = dataURL.split(',')[1];
+            imagePreview.src = dataURL;
+
+            const result = await processImage(base64Image, loadingIndicatorCapture, { sourceOverride: 'browser_motion' });
+            if (result && result.plate) {
+                setMotionNotifyLine(`Номер: ${(result.plate_full || result.plate).toUpperCase()}`);
+                notifyBrowserOcr('Номер распознан', (result.plate_full || result.plate).toUpperCase());
+            } else if (result) {
+                setMotionNotifyLine('Номер на чётком кадре не найден.');
+                notifyBrowserOcr('OCR', 'На чётком кадре номер не найден.');
+            }
+            if (motionNotifyClearTimer) clearTimeout(motionNotifyClearTimer);
+            motionNotifyClearTimer = setTimeout(() => setMotionNotifyLine(''), 8000);
+        } finally {
+            motionBusy = false;
+            motionCooldownUntil = performance.now() + MOTION_COOLDOWN_MS;
+            motionPrevGray = null;
+            motionPhase = 'idle';
+            setMotionStatusLine(`Пауза ${MOTION_COOLDOWN_MS / 1000} с перед следующим авто-съёмом.`);
+            if (motionAutoCheckbox?.checked && currentStream) {
+                motionRafId = requestAnimationFrame(motionTick);
+            }
+        }
     }
 
     async function startVideoStream() {
         clearError();
         if (currentStream) {
-            stopDirectAutoCapture();
-            if (autoCaptureDirectCheckbox) autoCaptureDirectCheckbox.checked = false;
+            stopMotionWatch();
+            if (motionAutoCheckbox) motionAutoCheckbox.checked = false;
             currentStream.getTracks().forEach(track => track.stop());
             currentStream = null;
             startStopText.textContent = 'Запустить Камеру';
@@ -850,8 +993,8 @@
             videoElement.classList.remove('hidden');
             startStopText.textContent = 'Остановить Камеру';
             captureAndProcessButton.disabled = false;
-            if (autoCaptureDirectCheckbox?.checked) {
-                startDirectAutoCaptureInterval();
+            if (motionAutoCheckbox?.checked) {
+                startMotionWatch();
             }
         } catch (err) {
             console.error("Error accessing camera: ", err);
@@ -883,7 +1026,7 @@
         
         imagePreview.src = dataURL;
 
-        return processImage(base64Image, loadingIndicatorCapture);
+        return processImage(base64Image, loadingIndicatorCapture, {});
     }
 
     async function processIpCameraFrame() {
@@ -1267,17 +1410,20 @@
 
     startCameraButton.addEventListener('click', startVideoStream);
     captureAndProcessButton.addEventListener('click', () => void captureFrame());
-    if (autoCaptureDirectCheckbox) {
-        autoCaptureDirectCheckbox.addEventListener('change', () => {
-            if (autoCaptureDirectCheckbox.checked) {
+    if (motionAutoCheckbox) {
+        motionAutoCheckbox.addEventListener('change', async () => {
+            if (motionAutoCheckbox.checked) {
                 if (!currentStream) {
-                    displayError('Сначала нажмите «Запустить камеру», затем включите автосъём.');
-                    autoCaptureDirectCheckbox.checked = false;
+                    displayError('Сначала запустите камеру, затем включите «Авто после движения».');
+                    motionAutoCheckbox.checked = false;
                     return;
                 }
-                startDirectAutoCaptureInterval();
+                if ('Notification' in window && Notification.permission === 'default') {
+                    await Notification.requestPermission();
+                }
+                startMotionWatch();
             } else {
-                stopDirectAutoCapture();
+                stopMotionWatch();
             }
         });
     }
