@@ -57,7 +57,7 @@
     <div class="flex flex-wrap items-start justify-between gap-3 mb-4">
         <div>
             <h1 class="text-3xl font-extrabold text-gray-800 mb-1">АРМ охраны</h1>
-            <p class="text-gray-500 text-sm">Один пост: въезд и выезд. Легковые номера, регион по желанию в OCR. Фото кадра только на экране, в БД не сохраняется.</p>
+            <p class="text-gray-500 text-sm">Один пост: первое распознавание номера — въезд, следующее — выезд (по данным БД). Легковой формат. Фото только на экране.</p>
         </div>
         <div class="text-right text-sm">
             <p class="text-gray-600">Оператор: <span id="operatorName" class="font-semibold text-gray-800">—</span></p>
@@ -71,15 +71,13 @@
         <button type="button" class="tab-btn px-4 py-2 rounded-lg font-semibold text-gray-600 hover:bg-gray-100" data-tab="lists">Списки</button>
     </div>
 
-    <div class="mb-4 p-3 bg-slate-50 rounded-xl border border-slate-200 flex flex-wrap items-center gap-4">
-        <span class="text-sm font-medium text-gray-700">Направление для записей в БД:</span>
-        <label class="inline-flex items-center gap-2 cursor-pointer text-sm">
-            <input type="radio" name="direction" value="entry" class="text-indigo-600" checked>
-            Въезд
-        </label>
-        <label class="inline-flex items-center gap-2 cursor-pointer text-sm">
-            <input type="radio" name="direction" value="exit" class="text-indigo-600">
-            Выезд
+    <div class="mb-4 p-3 bg-slate-50 rounded-xl border border-slate-200">
+        <label class="flex items-start gap-3 cursor-pointer">
+            <input type="checkbox" id="exitWithoutEntryCheckbox" class="mt-1 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500">
+            <span class="text-sm text-gray-700">
+                <span class="font-semibold text-gray-800">Выезд без записи о въезде</span>
+                — отметьте, если машина выезжает, а въезд не был зафиксирован (например, пропуск кадра). Иначе система сама чередует въезд и выезд по номеру.
+            </span>
         </label>
     </div>
 
@@ -110,8 +108,8 @@
             <label class="flex items-start gap-3 cursor-pointer">
                 <input type="checkbox" id="autoCaptureDirectCheckbox" class="mt-1 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500">
                 <span class="text-sm text-gray-700">
-                    <span class="font-semibold text-gray-800">Автосъём каждые 3 с</span>
-                    — пока камера включена, кадр снимается и отправляется на распознавание каждые 3 секунды (как бывший «живой» режим IP-камеры, но через камеру браузера).
+                    <span class="font-semibold text-gray-800">Автосъём каждые 5 с</span>
+                    — пока камера включена, кадр снимается и отправляется на распознавание каждые 5 секунд.
                 </span>
             </label>
         </div>
@@ -178,27 +176,6 @@
         </button>
     </div>
 
-    <div id="localBackendCameraSection" class="p-4 bg-gray-50 rounded-xl border border-gray-200 mb-6">
-        <h3 class="text-xl font-semibold text-gray-700 mb-3">Режим: Локальная камера ПК (через backend)</h3>
-        <p class="text-sm text-gray-500 mb-3">
-            Если браузер не дает доступ к камере, можно снять кадр на стороне сервиса (OpenCV).
-        </p>
-        <div class="flex gap-2 mb-3">
-            <input id="localCameraIndexInput"
-                   type="number"
-                   min="0"
-                   step="1"
-                   value="0"
-                   class="w-40 px-3 py-2 border border-gray-300 rounded-lg"
-                   title="Индекс камеры (обычно 0)">
-            <button id="processLocalCameraButton"
-                    class="flex-1 px-4 py-3 bg-emerald-600 text-white font-semibold rounded-xl shadow-lg hover:bg-emerald-700 transition duration-300 disabled:opacity-50 flex items-center justify-center">
-                <span id="localCameraButtonText">Снять кадр с локальной камеры</span>
-                <div id="loadingIndicatorLocalCamera" class="loader w-5 h-5 border-2 border-white border-solid rounded-full hidden ml-2"></div>
-            </button>
-        </div>
-    </div>
-    
     <div class="relative flex py-5 items-center">
         <div class="flex-grow border-t border-gray-300"></div>
         <span class="flex-shrink mx-4 text-gray-500 text-sm font-medium">ИЛИ</span>
@@ -219,6 +196,27 @@
         </button>
     </div>
 
+    <div id="manualPlateSection" class="space-y-3 p-4 bg-amber-50/80 rounded-xl border border-amber-200 mb-6">
+        <h3 class="text-xl font-semibold text-gray-800 mb-1">Ручной ввод номера</h3>
+        <p class="text-sm text-gray-600">Если номер грязный, заснеженный или закрыт — введите его с клавиатуры и при необходимости откройте шлагбаум. Те же правила въезда/выезда и журнал, что и при OCR.</p>
+        <input type="text" id="manualPlateInput" autocomplete="off" spellcheck="false"
+               class="w-full px-3 py-2 border border-amber-300 rounded-lg font-mono text-lg uppercase placeholder:normal-case"
+               placeholder="Например A111AA или A111AA77">
+        <label class="flex items-start gap-2 cursor-pointer text-sm text-gray-700">
+            <input type="checkbox" id="manualExitWithoutEntryCheckbox" class="mt-1 rounded border-gray-300 text-amber-700 focus:ring-amber-500">
+            <span>Выезд без записи о въезде (для этого ввода)</span>
+        </label>
+        <button type="button" id="manualRegisterOnlyBtn"
+                class="w-full px-4 py-2 bg-slate-700 text-white font-semibold rounded-xl hover:bg-slate-800 transition">
+            Только зафиксировать визит
+        </button>
+        <button type="button" id="manualRegisterAndOpenBtn"
+                class="w-full px-4 py-3 bg-orange-600 text-white font-semibold rounded-xl shadow-lg hover:bg-orange-700 transition">
+            Записать номер и открыть шлагбаум
+        </button>
+        <p id="manualPlateStatus" class="text-xs text-gray-600 min-h-[1rem]"></p>
+    </div>
+
 
     <div id="resultsContainer" class="mt-8 pt-6 border-t border-gray-200 hidden">
         <h2 class="text-2xl font-semibold text-gray-800 mb-4">Результат анализа</h2>
@@ -232,6 +230,8 @@
         <div id="duplicatePlateHint" class="bg-amber-50 border-l-4 border-amber-500 text-amber-800 p-3 rounded-lg mb-4 hidden">
             Этот номер уже недавно распознавался — в интерфейсе помечен как повтор; в журнале БД всё равно фиксируется событие с флагом «дубликат».
         </div>
+
+        <div id="autoDirectionHint" class="bg-slate-100 border border-slate-200 text-slate-800 p-3 rounded-lg mb-4 text-sm hidden"></div>
 
         <div id="listStatusHint" class="hidden p-3 rounded-lg mb-4 text-sm font-medium border"></div>
 
@@ -266,6 +266,16 @@
 
     <div id="tabJournal" class="hidden space-y-4">
         <h2 class="text-xl font-semibold text-gray-800">Журнал</h2>
+        <div class="flex flex-wrap gap-2 items-end mb-2">
+            <label class="text-xs text-gray-600 shrink-0">Период:</label>
+            <select id="journalPreset" class="px-3 py-2 border border-gray-300 rounded-lg text-sm">
+                <option value="all">Все дни</option>
+                <option value="last_hour">Последний час</option>
+                <option value="today">Сегодня</option>
+                <option value="day">Конкретный день…</option>
+            </select>
+            <input type="date" id="journalDayInput" class="px-2 py-2 border border-gray-300 rounded-lg text-sm hidden" title="Для режима «Конкретный день»">
+        </div>
         <div class="flex flex-wrap gap-2 items-end">
             <input type="text" id="journalSearch" placeholder="Поиск по номеру, оператору…" class="flex-1 min-w-[200px] px-3 py-2 border border-gray-300 rounded-lg">
             <select id="journalSort" class="px-3 py-2 border border-gray-300 rounded-lg text-sm">
@@ -298,6 +308,24 @@
             </table>
         </div>
         <p class="text-xs text-gray-500" id="journalRecognitionsMeta"></p>
+
+        <h3 class="text-lg font-semibold text-gray-800 pt-4 border-t">Визиты на территории</h3>
+        <p class="text-xs text-gray-500 mb-2">Время заезда/выезда и длительность пребывания (для «выезд без въезда» время заезда неизвестно).</p>
+        <div class="overflow-x-auto border border-gray-200 rounded-xl mb-6">
+            <table class="min-w-full text-sm text-left">
+                <thead class="bg-gray-100 text-gray-700">
+                    <tr>
+                        <th class="p-2">Номер</th>
+                        <th class="p-2">Заезд</th>
+                        <th class="p-2">Выезд</th>
+                        <th class="p-2">На территории</th>
+                        <th class="p-2">Без въезда</th>
+                    </tr>
+                </thead>
+                <tbody id="journalVisitsBody"></tbody>
+            </table>
+        </div>
+        <p class="text-xs text-gray-500 mb-4" id="journalVisitsMeta"></p>
 
         <h3 class="text-lg font-semibold text-gray-800 pt-4 border-t">Открытия шлагбаума (имитация)</h3>
         <div class="overflow-x-auto border border-gray-200 rounded-xl">
@@ -377,9 +405,6 @@
     const processIpCameraButton = document.getElementById('processIpCameraButton');
     const loadingIndicatorIpSingle = document.getElementById('loadingIndicatorIpSingle');
     const loadingIndicatorIpLive = document.getElementById('loadingIndicatorIpLive');
-    const localCameraIndexInput = document.getElementById('localCameraIndexInput');
-    const processLocalCameraButton = document.getElementById('processLocalCameraButton');
-    const loadingIndicatorLocalCamera = document.getElementById('loadingIndicatorLocalCamera');
 
     const ipCameraHostInput = document.getElementById('ipCameraHostInput');
     const ipCameraPortInput = document.getElementById('ipCameraPortInput');
@@ -420,15 +445,16 @@
     let OCR_SERVICE_URL;
     let HEALTH_CHECK_URL;
     let IP_CAMERA_PROCESS_URL;
-    let LOCAL_CAMERA_PROCESS_URL;
     let BARRIER_OPEN_URL;
     let AUTH_LOGIN_URL;
     let AUTH_LOGOUT_URL;
     let AUTH_ME_URL;
     let JOURNAL_REC_URL;
     let JOURNAL_BARRIER_URL;
+    let JOURNAL_VISITS_URL;
     let LIST_WHITE_URL;
     let LIST_BLACK_URL;
+    let MANUAL_VISIT_URL;
 
     const q = API_FROM_QUERY && API_FROM_QUERY.trim();
     const m = API_FROM_META && API_FROM_META.trim();
@@ -445,15 +471,16 @@
     OCR_SERVICE_URL = `${API_BASE}/process`;
     HEALTH_CHECK_URL = `${API_BASE}/health`;
     IP_CAMERA_PROCESS_URL = `${API_BASE}/process_ip_camera`;
-    LOCAL_CAMERA_PROCESS_URL = `${API_BASE}/process_local_camera`;
     BARRIER_OPEN_URL = `${API_BASE}/barrier/open`;
     AUTH_LOGIN_URL = `${API_BASE}/api/auth/login`;
     AUTH_LOGOUT_URL = `${API_BASE}/api/auth/logout`;
     AUTH_ME_URL = `${API_BASE}/api/auth/me`;
     JOURNAL_REC_URL = `${API_BASE}/api/journal/recognitions`;
     JOURNAL_BARRIER_URL = `${API_BASE}/api/journal/barrier`;
+    JOURNAL_VISITS_URL = `${API_BASE}/api/journal/visits`;
     LIST_WHITE_URL = `${API_BASE}/api/lists/white`;
     LIST_BLACK_URL = `${API_BASE}/api/lists/black`;
+    MANUAL_VISIT_URL = `${API_BASE}/api/manual/visit`;
 
     let currentStream = null;
     let ipLiveTimer = null;
@@ -473,9 +500,162 @@
         return fetch(url, merged);
     }
 
-    function getDirection() {
-        const r = document.querySelector('input[name="direction"]:checked');
-        return r ? r.value : 'entry';
+    function exitWithoutEntryChecked() {
+        const el = document.getElementById('exitWithoutEntryCheckbox');
+        return !!(el && el.checked);
+    }
+
+    function ocrPayloadFlags() {
+        return { exit_without_entry: exitWithoutEntryChecked() };
+    }
+
+    function applyDirectionHint(result) {
+        const el = document.getElementById('autoDirectionHint');
+        if (!el) return;
+        if (!result || !result.plate) {
+            el.classList.add('hidden');
+            el.textContent = '';
+            return;
+        }
+        el.classList.remove('hidden');
+        let t = `В БД: <strong>${result.direction_label || '—'}</strong>`;
+        if (result.stay_duration_human) {
+            t += ` · на территории: <strong>${result.stay_duration_human}</strong>`;
+        }
+        if (result.exit_without_entry_applied) {
+            t += ' · <span class="text-amber-800">выезд без зафиксированного въезда</span>';
+        }
+        if (result.dedup_window_minutes != null) {
+            t += ` · дубликат OCR, если тот же номер чаще чем раз в <strong>${Number(result.dedup_window_minutes).toFixed(1)}</strong> мин`;
+        }
+        el.innerHTML = t;
+    }
+
+    function directionRu(code) {
+        if (!code) return '—';
+        if (code === 'exit') return 'выезд';
+        if (code === 'exit_no_entry') return 'выезд (б/в)';
+        if (code === 'manual') return 'вручную';
+        return 'въезд';
+    }
+
+    function applyKppResultFromApi(result, previewOverride) {
+        plateOutput.textContent = (result.plate || '').toUpperCase() || '—';
+        plateFullOutput.textContent = result.plate_full ? `Полный номер (с регионом): ${result.plate_full.toUpperCase()}` : '';
+        explanationOutput.textContent = result.model_explanation || result.confidence_explanation || 'Нет дополнительного объяснения.';
+        ocrLogOutput.textContent = result.ocr_log || 'Лог OCR отсутствует.';
+        if (previewOverride !== undefined) {
+            imagePreview.src = previewOverride || '';
+        } else if (result.preview_data_url) {
+            imagePreview.src = result.preview_data_url;
+        }
+        duplicatePlateHint.classList.toggle('hidden', !result.is_duplicate_recent);
+        setListStatusBadge(result.list_status || 'none');
+        applyDirectionHint(result);
+        if (result.plate) {
+            lastPlateBase = (result.plate_base || result.plate || '').toUpperCase();
+            lastPlateFull = (result.plate_full || result.plate || '').toUpperCase();
+            noPlateWarning.classList.add('hidden');
+            const ex = document.getElementById('exitWithoutEntryCheckbox');
+            if (ex) ex.checked = false;
+        } else {
+            lastPlateBase = '';
+            lastPlateFull = '';
+            noPlateWarning.classList.remove('hidden');
+            duplicatePlateHint.classList.add('hidden');
+            applyDirectionHint(null);
+        }
+        resultsContainer.classList.remove('hidden');
+    }
+
+    async function requestBarrierOpen() {
+        const response = await apiFetch(BARRIER_OPEN_URL, {
+            method: 'POST',
+            mode: 'cors',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                plate_base: lastPlateBase || null,
+                plate_full: lastPlateFull || null,
+                note: 'manual_ui',
+            }),
+        });
+        if (response.status === 401) {
+            showLoginView();
+            throw new Error('Нужен вход в систему.');
+        }
+        const result = await response.json().catch(() => ({}));
+        if (!response.ok || !result.ok) {
+            throw new Error(result.error || `Ошибка: ${response.status}`);
+        }
+        return result;
+    }
+
+    async function submitManualPlate(andOpenBarrier) {
+        clearError();
+        const raw = (document.getElementById('manualPlateInput')?.value || '').trim();
+        const st = document.getElementById('manualPlateStatus');
+        const btnOpen = document.getElementById('manualRegisterAndOpenBtn');
+        const btnOnly = document.getElementById('manualRegisterOnlyBtn');
+        if (!raw) {
+            displayError('Введите номер.');
+            return;
+        }
+        const exitWithoutEntry = !!(document.getElementById('manualExitWithoutEntryCheckbox')?.checked);
+        if (btnOpen) btnOpen.disabled = true;
+        if (btnOnly) btnOnly.disabled = true;
+        if (st) st.textContent = 'Сохранение…';
+        try {
+            const isServiceReady = await checkServiceStatus();
+            if (!isServiceReady) {
+                displayError('Локальный сервис не отвечает.');
+                return;
+            }
+            const r = await apiFetch(MANUAL_VISIT_URL, {
+                method: 'POST',
+                mode: 'cors',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ plate: raw, exit_without_entry: exitWithoutEntry }),
+            });
+            const result = await r.json().catch(() => ({}));
+            if (r.status === 401) {
+                showLoginView();
+                return;
+            }
+            if (!r.ok) {
+                throw new Error(result.error || `Ошибка: ${r.status}`);
+            }
+            applyKppResultFromApi(result, '');
+            const mEx = document.getElementById('manualExitWithoutEntryCheckbox');
+            if (mEx) mEx.checked = false;
+            if (andOpenBarrier) {
+                barrierStatusText.textContent = 'Отправка команды шлагбаума…';
+                const br = await requestBarrierOpen();
+                barrierStatusText.textContent = br.message || 'Событие записано в журнал (имитация).';
+                if (st) st.textContent = 'Визит записан, шлагбаум — имитация (см. статус ниже).';
+            } else {
+                barrierStatusText.textContent = '';
+                if (st) st.textContent = 'Визит записан в журнал.';
+            }
+        } catch (e) {
+            if (st) st.textContent = '';
+            displayError(e.message || String(e));
+        } finally {
+            if (btnOpen) btnOpen.disabled = false;
+            if (btnOnly) btnOnly.disabled = false;
+        }
+    }
+
+    function journalPeriodQs() {
+        const presetEl = document.getElementById('journalPreset');
+        const dayEl = document.getElementById('journalDayInput');
+        if (!presetEl) return '';
+        const preset = presetEl.value;
+        if (preset === 'day') {
+            const d = (dayEl && dayEl.value) || '';
+            return d ? `&day=${encodeURIComponent(d)}` : '';
+        }
+        if (preset === 'all') return '';
+        return `&preset=${encodeURIComponent(preset)}`;
     }
 
     function setListStatusBadge(status) {
@@ -523,17 +703,14 @@
         const button =
             indicator === loadingIndicatorCapture ? captureAndProcessButton :
             indicator === loadingIndicatorIpSingle ? processIpCameraButton :
-            indicator === loadingIndicatorLocalCamera ? processLocalCameraButton :
             processFileButton;
         const textSpan =
             indicator === loadingIndicatorCapture ? document.getElementById('captureButtonText') :
             indicator === loadingIndicatorIpSingle ? document.getElementById('ipButtonText') :
-            indicator === loadingIndicatorLocalCamera ? document.getElementById('localCameraButtonText') :
             document.getElementById('fileButtonText');
         const defaultText =
             indicator === loadingIndicatorCapture ? 'Сделать Снимок и Найти Номер' :
             indicator === loadingIndicatorIpSingle ? 'Проверить один кадр' :
-            indicator === loadingIndicatorLocalCamera ? 'Снять кадр с локальной камеры' :
             'Обработать Загруженный Файл';
 
         button.disabled = isLoading;
@@ -586,8 +763,8 @@
 
         const payload = {
             image_data: base64Image,
-            direction: getDirection(),
             source: loadingIndicator === loadingIndicatorCapture ? 'browser' : 'upload',
+            ...ocrPayloadFlags(),
         };
 
         try {
@@ -611,24 +788,7 @@
                 throw new Error(result.error || `Ошибка бэкенда! Статус: ${response.status}`);
             }
             
-            plateOutput.textContent = result.plate.toUpperCase() || '—';
-            plateFullOutput.textContent = result.plate_full ? `Полный номер (с регионом): ${result.plate_full.toUpperCase()}` : '';
-            explanationOutput.textContent = result.model_explanation || result.confidence_explanation || 'Нет дополнительного объяснения.';
-            ocrLogOutput.textContent = result.ocr_log || 'Лог OCR отсутствует.';
-            duplicatePlateHint.classList.toggle('hidden', !result.is_duplicate_recent);
-            setListStatusBadge(result.list_status || 'none');
-            if (result.plate) {
-                lastPlateBase = (result.plate_base || result.plate || '').toUpperCase();
-                lastPlateFull = (result.plate_full || result.plate || '').toUpperCase();
-                noPlateWarning.classList.add('hidden');
-            } else {
-                lastPlateBase = '';
-                lastPlateFull = '';
-                noPlateWarning.classList.remove('hidden');
-                duplicatePlateHint.classList.add('hidden');
-            }
-            
-            resultsContainer.classList.remove('hidden');
+            applyKppResultFromApi(result, undefined);
 
         } catch (e) {
             console.error("Local Service Call failed:", e);
@@ -661,7 +821,7 @@
         stopDirectAutoCapture();
         if (!autoCaptureDirectCheckbox?.checked || !currentStream) return;
         void tickDirectAutoCapture();
-        autoCaptureDirectInterval = setInterval(() => void tickDirectAutoCapture(), 3000);
+        autoCaptureDirectInterval = setInterval(() => void tickDirectAutoCapture(), 5000);
     }
 
     async function startVideoStream() {
@@ -749,7 +909,7 @@
                 method: 'POST',
                 mode: 'cors',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ camera_url: cameraUrl, direction: getDirection() })
+                body: JSON.stringify({ camera_url: cameraUrl, ...ocrPayloadFlags() })
             });
             if (response.status === 401) {
                 showLoginView();
@@ -761,87 +921,12 @@
             }
 
             const result = await response.json();
-            plateOutput.textContent = (result.plate || '').toUpperCase() || '—';
-            plateFullOutput.textContent = result.plate_full ? `Полный номер (с регионом): ${result.plate_full.toUpperCase()}` : '';
-            explanationOutput.textContent = result.model_explanation || result.confidence_explanation || 'Нет дополнительного объяснения.';
-            ocrLogOutput.textContent = result.ocr_log || 'Лог OCR отсутствует.';
-            imagePreview.src = result.preview_data_url || '';
-            duplicatePlateHint.classList.toggle('hidden', !result.is_duplicate_recent);
-            setListStatusBadge(result.list_status || 'none');
-            if (result.plate) {
-                lastPlateBase = (result.plate_base || result.plate || '').toUpperCase();
-                lastPlateFull = (result.plate_full || '').toUpperCase();
-                noPlateWarning.classList.add('hidden');
-            } else {
-                lastPlateBase = '';
-                lastPlateFull = '';
-                noPlateWarning.classList.remove('hidden');
-                duplicatePlateHint.classList.add('hidden');
-            }
-            resultsContainer.classList.remove('hidden');
+            applyKppResultFromApi(result, undefined);
         } catch (err) {
             console.error("IP camera processing failed:", err);
             displayError(`Не удалось получить кадр с IP-камеры: ${err.message}. Проверьте URL и сеть.`);
         } finally {
             setLoadingState(false, loadingIndicatorIpSingle);
-        }
-    }
-
-    async function processLocalCameraFrame() {
-        clearError();
-        setLoadingState(true, loadingIndicatorLocalCamera);
-        resultsContainer.classList.add('hidden');
-        noPlateWarning.classList.add('hidden');
-
-        try {
-            const isServiceReady = await checkServiceStatus();
-            if (!isServiceReady) {
-                displayError("Локальный сервис OCR не запущен. Пожалуйста, запустите Docker-контейнер.");
-                return;
-            }
-
-            const cameraIndex = Math.max(0, Number(localCameraIndexInput.value) || 0);
-            localCameraIndexInput.value = String(cameraIndex);
-
-            const response = await apiFetch(LOCAL_CAMERA_PROCESS_URL, {
-                method: 'POST',
-                mode: 'cors',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ camera_index: cameraIndex, direction: getDirection() })
-            });
-            if (response.status === 401) {
-                showLoginView();
-                throw new Error('Нужен вход в систему.');
-            }
-            if (!response.ok) {
-                const errBody = await response.json().catch(() => ({}));
-                throw new Error(errBody.error || `Ошибка локальной камеры: ${response.status}`);
-            }
-
-            const result = await response.json();
-            plateOutput.textContent = (result.plate || '').toUpperCase() || '—';
-            plateFullOutput.textContent = result.plate_full ? `Полный номер (с регионом): ${result.plate_full.toUpperCase()}` : '';
-            explanationOutput.textContent = result.model_explanation || result.confidence_explanation || 'Нет дополнительного объяснения.';
-            ocrLogOutput.textContent = result.ocr_log || 'Лог OCR отсутствует.';
-            imagePreview.src = result.preview_data_url || '';
-            duplicatePlateHint.classList.toggle('hidden', !result.is_duplicate_recent);
-            setListStatusBadge(result.list_status || 'none');
-            if (result.plate) {
-                lastPlateBase = (result.plate_base || result.plate || '').toUpperCase();
-                lastPlateFull = (result.plate_full || '').toUpperCase();
-                noPlateWarning.classList.add('hidden');
-            } else {
-                lastPlateBase = '';
-                lastPlateFull = '';
-                noPlateWarning.classList.remove('hidden');
-                duplicatePlateHint.classList.add('hidden');
-            }
-            resultsContainer.classList.remove('hidden');
-        } catch (err) {
-            console.error("Local backend camera processing failed:", err);
-            displayError(`Не удалось получить кадр с локальной камеры: ${err.message}.`);
-        } finally {
-            setLoadingState(false, loadingIndicatorLocalCamera);
         }
     }
 
@@ -917,7 +1002,8 @@
         const barBody = document.getElementById('journalBarrierBody');
         if (!recBody) return;
 
-        const recUrl = `${JOURNAL_REC_URL}?sort=${encodeURIComponent(sort)}&order=${encodeURIComponent(order)}&limit=200&q=${encodeURIComponent(q)}`;
+        const per = journalPeriodQs();
+        const recUrl = `${JOURNAL_REC_URL}?sort=${encodeURIComponent(sort)}&order=${encodeURIComponent(order)}&limit=200&q=${encodeURIComponent(q)}${per}`;
         const rr = await apiFetch(recUrl, { method: 'GET', mode: 'cors' });
         if (rr.status === 401) {
             showLoginView();
@@ -933,7 +1019,7 @@
             td0.textContent = fmtTs(row.created_at);
             const td1 = document.createElement('td');
             td1.className = 'p-2';
-            td1.textContent = row.direction === 'exit' ? 'выезд' : 'въезд';
+            td1.textContent = directionRu(row.direction);
             const td2 = document.createElement('td');
             td2.className = 'p-2 font-mono';
             td2.textContent = ((row.plate_full || row.plate_base || '') + '').toUpperCase();
@@ -958,7 +1044,7 @@
         if (meta) meta.textContent = `Всего записей (по фильтру): ${data.total ?? (data.items || []).length}`;
 
         const br = await apiFetch(
-            `${JOURNAL_BARRIER_URL}?order=desc&limit=100&q=${encodeURIComponent(q)}`,
+            `${JOURNAL_BARRIER_URL}?order=desc&limit=100&q=${encodeURIComponent(q)}${per}`,
             { method: 'GET', mode: 'cors' }
         );
         const bd = await br.json().catch(() => ({ items: [] }));
@@ -972,7 +1058,7 @@
                 c0.textContent = fmtTs(row.created_at);
                 const c1 = document.createElement('td');
                 c1.className = 'p-2';
-                c1.textContent = row.direction === 'exit' ? 'выезд' : 'въезд';
+                c1.textContent = directionRu(row.direction);
                 const c2 = document.createElement('td');
                 c2.className = 'p-2 font-mono';
                 c2.textContent = ((row.plate_full || row.plate_base || '—') + '').toUpperCase();
@@ -986,6 +1072,39 @@
                 barBody.appendChild(tr);
             });
         }
+
+        const visBody = document.getElementById('journalVisitsBody');
+        const visMeta = document.getElementById('journalVisitsMeta');
+        const vr = await apiFetch(
+            `${JOURNAL_VISITS_URL}?limit=200&q=${encodeURIComponent(q)}${per}`,
+            { method: 'GET', mode: 'cors' }
+        );
+        const vd = await vr.json().catch(() => ({ items: [], total: 0 }));
+        if (visBody) {
+            visBody.innerHTML = '';
+            (vd.items || []).forEach((row) => {
+                const tr = document.createElement('tr');
+                tr.className = 'border-t border-gray-100';
+                const a = document.createElement('td');
+                a.className = 'p-2 font-mono font-semibold';
+                a.textContent = (row.plate_base || '').toUpperCase();
+                const b = document.createElement('td');
+                b.className = 'p-2 whitespace-nowrap text-xs';
+                b.textContent = row.entered_at != null ? fmtTs(row.entered_at) : '—';
+                const c = document.createElement('td');
+                c.className = 'p-2 whitespace-nowrap text-xs';
+                c.textContent = row.exited_at != null ? fmtTs(row.exited_at) : 'на территории';
+                const d = document.createElement('td');
+                d.className = 'p-2 text-xs';
+                d.textContent = row.duration_human || (row.exited_at ? '—' : '…');
+                const e = document.createElement('td');
+                e.className = 'p-2 text-xs';
+                e.textContent = row.exit_without_entry ? 'да' : 'нет';
+                tr.append(a, b, c, d, e);
+                visBody.appendChild(tr);
+            });
+        }
+        if (visMeta) visMeta.textContent = `Визитов в выборке: ${vd.total ?? (vd.items || []).length}`;
     }
 
     async function loadPlateLists() {
@@ -1088,6 +1207,22 @@
     if (journalRefreshBtn) {
         journalRefreshBtn.addEventListener('click', () => void loadJournalTables());
     }
+    const journalPresetEl = document.getElementById('journalPreset');
+    const journalDayInputEl = document.getElementById('journalDayInput');
+    function syncJournalDayVisibility() {
+        if (!journalPresetEl || !journalDayInputEl) return;
+        journalDayInputEl.classList.toggle('hidden', journalPresetEl.value !== 'day');
+    }
+    if (journalPresetEl) {
+        journalPresetEl.addEventListener('change', () => {
+            syncJournalDayVisibility();
+            void loadJournalTables();
+        });
+        syncJournalDayVisibility();
+    }
+    if (journalDayInputEl) {
+        journalDayInputEl.addEventListener('change', () => void loadJournalTables());
+    }
 
     const whiteAddBtn = document.getElementById('whiteAddBtn');
     const blackAddBtn = document.getElementById('blackAddBtn');
@@ -1147,7 +1282,6 @@
         });
     }
     processIpCameraButton.addEventListener('click', processIpCameraFrame);
-    processLocalCameraButton.addEventListener('click', processLocalCameraFrame);
     startStopIpLiveButton.addEventListener('click', startStopIpLiveMode);
     applyIpPresetButton.addEventListener('click', () => {
         const host = (ipCameraHostInput.value || '').trim();
@@ -1211,25 +1345,7 @@
         barrierStatusText.textContent = 'Отправка команды...';
         openBarrierButton.disabled = true;
         try {
-            const response = await apiFetch(BARRIER_OPEN_URL, {
-                method: 'POST',
-                mode: 'cors',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    direction: getDirection(),
-                    plate_base: lastPlateBase || null,
-                    plate_full: lastPlateFull || null,
-                    note: 'manual_ui',
-                })
-            });
-            if (response.status === 401) {
-                showLoginView();
-                throw new Error('Нужен вход в систему.');
-            }
-            const result = await response.json().catch(() => ({}));
-            if (!response.ok || !result.ok) {
-                throw new Error(result.error || `Ошибка: ${response.status}`);
-            }
+            const result = await requestBarrierOpen();
             barrierStatusText.textContent = result.message || 'Событие записано в журнал (имитация).';
         } catch (err) {
             barrierStatusText.textContent = 'Не удалось открыть шлагбаум.';
@@ -1238,6 +1354,9 @@
             openBarrierButton.disabled = false;
         }
     });
+
+    document.getElementById('manualRegisterOnlyBtn')?.addEventListener('click', () => void submitManualPlate(false));
+    document.getElementById('manualRegisterAndOpenBtn')?.addEventListener('click', () => void submitManualPlate(true));
     
     window.addEventListener('load', async () => {
         const ok = await checkSessionOnLoad();

@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 import os
-import sys
 import re
 import time
+import datetime as dt
 import ipaddress
 import threading
 import functools
@@ -157,7 +157,18 @@ DIGIT_EQUIV_WEAK = {
 
 ALLOWED_EXTRA_CHARS = set(DIGIT_EQUIV_WEAK.keys())
 
-DEDUP_WINDOW_SECONDS = int(os.getenv("DEDUP_WINDOW_SECONDS", "30"))
+
+def _dedup_window_seconds():
+    """Окно антидубликата: приоритет DEDUP_WINDOW_SECONDS, иначе DEDUP_WINDOW_MINUTES (по умолчанию 15 мин)."""
+    sec_env = os.getenv("DEDUP_WINDOW_SECONDS")
+    if sec_env is not None and str(sec_env).strip() != "":
+        return max(1, int(float(sec_env)))
+    minutes = float(os.getenv("DEDUP_WINDOW_MINUTES", "15"))
+    return max(1, int(minutes * 60))
+
+
+DEDUP_WINDOW_SECONDS = _dedup_window_seconds()
+DEDUP_WINDOW_MINUTES = DEDUP_WINDOW_SECONDS / 60.0
 recent_plate_events = {}
 recent_plate_events_lock = threading.Lock()
 
@@ -325,13 +336,6 @@ def login_required(view):
     return wrapped
 
 
-def direction_from_payload(data):
-    d = (data.get("direction") or "entry").strip().lower()
-    if d not in ("entry", "exit"):
-        return None
-    return d
-
-
 def plate_base_from_user_string(s):
     """Нормализация ввода для белого/чёрного списка (легковой формат)."""
     if not s:
@@ -343,7 +347,18 @@ def plate_base_from_user_string(s):
     return None
 
 
-def log_recognition_event(user_id, direction, plate, region, conf, source, is_dup, list_status):
+def plate_and_region_from_manual_input(raw):
+    """Разбор ручного ввода номера (как для списков, с опциональным регионом)."""
+    if not raw:
+        return None, None
+    t = normalize_chars(str(raw).strip())
+    plate, region, _cost = try_extract_plate_from_text(t)
+    if not plate or not PLATE_REGEX.match(plate):
+        return None, None
+    return plate, region or ""
+
+
+def log_recognition_event(user_id, direction, plate, region, conf, source, is_dup, list_status, visit_id=None):
     if not plate or not user_id:
         return
     try:
@@ -358,9 +373,64 @@ def log_recognition_event(user_id, direction, plate, region, conf, source, is_du
             source,
             is_dup,
             list_status,
+            visit_id=visit_id,
         )
     except Exception:
         logger.exception("log_recognition_event failed")
+
+
+def direction_label_ru(code):
+    if code == "exit":
+        return "выезд"
+    if code == "exit_no_entry":
+        return "выезд (без въезда)"
+    return "въезд"
+
+
+def journal_query_time_bounds():
+    """?preset=last_hour|today&day=YYYY-MM-DD или from_ts / to_ts (unix). Без параметров — без ограничения по времени."""
+    preset = (request.args.get("preset") or "").strip().lower()
+    day_s = (request.args.get("day") or "").strip()
+    from_q = request.args.get("from_ts", type=int)
+    to_q = request.args.get("to_ts", type=int)
+    if preset == "last_hour":
+        now = int(time.time())
+        return now - 3600, now
+    if preset == "today":
+        d = dt.date.today()
+        start = dt.datetime.combine(d, dt.time.min)
+        return int(start.timestamp()), int(time.time())
+    if day_s:
+        try:
+            d = dt.datetime.strptime(day_s, "%Y-%m-%d").date()
+        except ValueError:
+            return None, None
+        start = dt.datetime.combine(d, dt.time.min)
+        end = dt.datetime.combine(d, dt.time.max)
+        return int(start.timestamp()), int(end.timestamp())
+    if from_q is not None or to_q is not None:
+        return from_q, to_q
+    return None, None
+
+
+def recognition_sidecar(plate, data):
+    """Авто въезд/выезд по БД + опционально «выезд без въезда»."""
+    if not plate:
+        return None, None, None, None, None, False
+    exit_wo = bool(data.get("exit_without_entry"))
+    direction, visit_id, dur_sec, exit_applied = arm_db.apply_visit_for_recognition(
+        plate, session["user_id"], exit_wo
+    )
+    dh = arm_db.format_duration_human(dur_sec) if dur_sec is not None else None
+    return direction, visit_id, dur_sec, dh, direction_label_ru(direction), exit_applied
+
+
+def attach_ocr_meta(res, is_duplicate_recent, list_status):
+    res["is_duplicate_recent"] = is_duplicate_recent
+    res["dedup_window_seconds"] = DEDUP_WINDOW_SECONDS
+    res["dedup_window_minutes"] = round(DEDUP_WINDOW_MINUTES, 4)
+    res["list_status"] = list_status
+    return res
 
 
 # =================================================================
@@ -780,11 +850,8 @@ def index_page():
 @login_required
 def process_data():
     data = request.get_json(silent=True) or {}
-    direction = direction_from_payload(data)
-    if direction is None:
-        return jsonify({"error": "direction должен быть entry или exit"}), 400
     raw_src = (data.get("source") or "upload").strip().lower()[:32]
-    if raw_src not in ("browser", "upload", "ip_camera", "local_camera"):
+    if raw_src not in ("browser", "upload", "ip_camera"):
         raw_src = "upload"
     base64_img = data.get('image_data')
     
@@ -802,16 +869,20 @@ def process_data():
         full_plate = f"{plate}{region}" if plate else ""
         is_duplicate_recent = mark_plate_event_and_check_duplicate(plate) if plate else False
         list_status = arm_db.resolve_list_status(plate) if plate else "none"
+        auto_dir = visit_id = dur_sec = dur_human = dir_label = None
+        exit_wo_applied = False
         if plate:
+            auto_dir, visit_id, dur_sec, dur_human, dir_label, exit_wo_applied = recognition_sidecar(plate, data)
             log_recognition_event(
                 session["user_id"],
-                direction,
+                auto_dir,
                 plate,
                 region,
                 conf,
                 raw_src,
                 is_duplicate_recent,
                 list_status,
+                visit_id=visit_id,
             )
 
         if plate:
@@ -823,10 +894,14 @@ def process_data():
                 "confidence_explanation": f"Найден: {full_plate} ({conf:.2f}).",
                 "model_explanation": model_explanation,
                 "ocr_log": ocr_log,
-                "is_duplicate_recent": is_duplicate_recent,
-                "dedup_window_seconds": DEDUP_WINDOW_SECONDS,
-                "list_status": list_status,
+                "auto_direction": auto_dir,
+                "direction_label": dir_label,
+                "visit_id": visit_id,
+                "stay_duration_seconds": dur_sec,
+                "stay_duration_human": dur_human,
+                "exit_without_entry_applied": exit_wo_applied,
             }
+            attach_ocr_meta(res, is_duplicate_recent, list_status)
         else:
             res = {
                 "plate": "",
@@ -836,10 +911,8 @@ def process_data():
                 "confidence_explanation": "Не найдено.",
                 "model_explanation": model_explanation,
                 "ocr_log": ocr_log,
-                "is_duplicate_recent": False,
-                "dedup_window_seconds": DEDUP_WINDOW_SECONDS,
-                "list_status": "none",
             }
+            attach_ocr_meta(res, False, "none")
 
         return jsonify(res), 200
 
@@ -852,9 +925,6 @@ def process_data():
 @login_required
 def process_ip_camera():
     data = request.get_json(silent=True) or {}
-    direction = direction_from_payload(data)
-    if direction is None:
-        return jsonify({"error": "direction должен быть entry или exit"}), 400
     camera_url = normalize_camera_url((data.get("camera_url") or "").strip())
 
     if not camera_url:
@@ -868,16 +938,20 @@ def process_ip_camera():
         full_plate = f"{plate}{region}" if plate else ""
         is_duplicate_recent = mark_plate_event_and_check_duplicate(plate) if plate else False
         list_status = arm_db.resolve_list_status(plate) if plate else "none"
+        auto_dir = visit_id = dur_sec = dur_human = dir_label = None
+        exit_wo_applied = False
         if plate:
+            auto_dir, visit_id, dur_sec, dur_human, dir_label, exit_wo_applied = recognition_sidecar(plate, data)
             log_recognition_event(
                 session["user_id"],
-                direction,
+                auto_dir,
                 plate,
                 region,
                 conf,
                 "ip_camera",
                 is_duplicate_recent,
                 list_status,
+                visit_id=visit_id,
             )
 
         preview_b64 = base64.b64encode(preview_bytes).decode("utf-8")
@@ -890,81 +964,19 @@ def process_ip_camera():
             "model_explanation": model_explanation,
             "ocr_log": ocr_log,
             "preview_data_url": f"data:image/jpeg;base64,{preview_b64}",
-            "is_duplicate_recent": is_duplicate_recent,
-            "dedup_window_seconds": DEDUP_WINDOW_SECONDS,
-            "list_status": list_status,
+            "auto_direction": auto_dir,
+            "direction_label": dir_label,
+            "visit_id": visit_id,
+            "stay_duration_seconds": dur_sec,
+            "stay_duration_human": dur_human,
+            "exit_without_entry_applied": exit_wo_applied,
         }
+        attach_ocr_meta(res, is_duplicate_recent, list_status)
         return jsonify(res), 200
     except Exception as e:
         logger.exception("process_ip_camera: failed: %s", e)
         return jsonify({"error": str(e)}), 500
 
-
-@app.route('/process_local_camera', methods=['POST'])
-@login_required
-def process_local_camera():
-    data = request.get_json(silent=True) or {}
-    direction = direction_from_payload(data)
-    if direction is None:
-        return jsonify({"error": "direction должен быть entry или exit"}), 400
-    camera_index = int(data.get('camera_index', 0))
-
-    logger.info("process_local_camera: opening camera index=%s", camera_index)
-    if sys.platform == "win32":
-        cap = cv2.VideoCapture(camera_index, cv2.CAP_DSHOW)
-    else:
-        cap = cv2.VideoCapture(camera_index)
-    if not cap.isOpened():
-        logger.error("process_local_camera: cannot open camera index=%s", camera_index)
-        return jsonify({"error": f"Не удалось открыть локальную камеру index={camera_index}"}), 500
-
-    try:
-        ok, frame = cap.read()
-        if not ok or frame is None:
-            logger.error("process_local_camera: failed to read frame index=%s", camera_index)
-            return jsonify({"error": "Не удалось получить кадр с локальной камеры"}), 500
-
-        model_explanation, ocr_log, plate, region, conf = process_ocr_pipeline(frame)
-        full_plate = f"{plate}{region}" if plate else ""
-        is_duplicate_recent = mark_plate_event_and_check_duplicate(plate) if plate else False
-        logger.info("process_local_camera: plate=%r region=%r conf=%.4f", plate, region, conf)
-        list_status = arm_db.resolve_list_status(plate) if plate else "none"
-        if plate:
-            log_recognition_event(
-                session["user_id"],
-                direction,
-                plate,
-                region,
-                conf,
-                "local_camera",
-                is_duplicate_recent,
-                list_status,
-            )
-
-        ok_jpg, jpg_buf = cv2.imencode(".jpg", frame)
-        preview_data_url = ""
-        if ok_jpg:
-            preview_b64 = base64.b64encode(jpg_buf.tobytes()).decode("utf-8")
-            preview_data_url = f"data:image/jpeg;base64,{preview_b64}"
-
-        return jsonify({
-            "plate": plate or "",
-            "plate_base": plate or "",
-            "plate_full": full_plate if plate else "",
-            "region": region or "",
-            "confidence_explanation": (f"Найден: {full_plate} ({conf:.2f})." if plate else "Не найдено."),
-            "model_explanation": model_explanation,
-            "ocr_log": ocr_log,
-            "preview_data_url": preview_data_url,
-            "is_duplicate_recent": is_duplicate_recent,
-            "dedup_window_seconds": DEDUP_WINDOW_SECONDS,
-            "list_status": list_status,
-        }), 200
-    except Exception as e:
-        logger.exception("process_local_camera: failed: %s", e)
-        return jsonify({"error": str(e)}), 500
-    finally:
-        cap.release()
 
 @app.route('/health', methods=['GET'])
 def health():
@@ -977,6 +989,8 @@ def health():
         "model_loaded": ready,
         "yolo_loaded": yolo_ready,
         "yolo_model_path": YOLO_MODEL_PATH,
+        "dedup_window_minutes": round(DEDUP_WINDOW_MINUTES, 4),
+        "dedup_window_seconds": DEDUP_WINDOW_SECONDS,
     }), 200
 
 
@@ -988,9 +1002,7 @@ def barrier_open():
     Физический привод не подключается — фиксируется только событие в БД.
     """
     payload = request.get_json(silent=True) or {}
-    direction = direction_from_payload(payload)
-    if direction is None:
-        return jsonify({"error": "direction должен быть entry или exit"}), 400
+    direction = "manual"
     note = (payload.get("note") or "").strip()[:200]
     plate_base = (payload.get("plate_base") or "").strip().upper()[:16] or None
     plate_full = (payload.get("plate_full") or "").strip().upper()[:24] or None
@@ -999,9 +1011,8 @@ def barrier_open():
         "Сервоприводы и реле не подключены."
     )
     logger.info(
-        "barrier_open: stub user=%s direction=%s plate_base=%s",
+        "barrier_open: stub user=%s plate_base=%s",
         session.get("user_id"),
-        direction,
         plate_base,
     )
     try:
@@ -1059,6 +1070,56 @@ def api_auth_me():
     ), 200
 
 
+@app.route("/api/manual/visit", methods=["POST"])
+@login_required
+def api_manual_visit():
+    """Ручной ввод номера охранником (без OCR): те же правила въезд/выезд и журнал."""
+    data = request.get_json(silent=True) or {}
+    raw = (data.get("plate") or "").strip()
+    plate, region = plate_and_region_from_manual_input(raw)
+    if not plate:
+        return jsonify(
+            {"error": "Номер не распознан. Ожидается легковой формат БЦЦЦББ (латиница A,B,E,K,M,H,O,P,C,T,Y,X и цифры)."}
+        ), 400
+
+    exit_wo = bool(data.get("exit_without_entry"))
+    sidecar_data = {"exit_without_entry": exit_wo}
+    full_plate = f"{plate}{region}"
+    is_duplicate_recent = mark_plate_event_and_check_duplicate(plate)
+    list_status = arm_db.resolve_list_status(plate)
+    auto_dir, visit_id, dur_sec, dur_human, dir_label, exit_wo_applied = recognition_sidecar(plate, sidecar_data)
+    log_recognition_event(
+        session["user_id"],
+        auto_dir,
+        plate,
+        region,
+        1.0,
+        "manual_guard",
+        is_duplicate_recent,
+        list_status,
+        visit_id=visit_id,
+    )
+    logger.info("api_manual_visit: plate=%s region=%s direction=%s", plate, region, auto_dir)
+    res = {
+        "plate": plate,
+        "plate_base": plate,
+        "plate_full": full_plate,
+        "region": region,
+        "confidence_explanation": f"Ручной ввод: {full_plate}.",
+        "model_explanation": "Номер введён охранником (без распознавания по кадру).",
+        "ocr_log": "",
+        "preview_data_url": "",
+        "auto_direction": auto_dir,
+        "direction_label": dir_label,
+        "visit_id": visit_id,
+        "stay_duration_seconds": dur_sec,
+        "stay_duration_human": dur_human,
+        "exit_without_entry_applied": exit_wo_applied,
+    }
+    attach_ocr_meta(res, is_duplicate_recent, list_status)
+    return jsonify(res), 200
+
+
 @app.route("/api/journal/recognitions", methods=["GET"])
 @login_required
 def api_journal_recognitions():
@@ -1067,7 +1128,10 @@ def api_journal_recognitions():
     q = (request.args.get("q") or "").strip()
     limit = request.args.get("limit", 100, type=int)
     offset = request.args.get("offset", 0, type=int)
-    rows, total = arm_db.journal_recognitions(sort=sort, order=order, q=q, limit=limit, offset=offset)
+    ft, tt = journal_query_time_bounds()
+    rows, total = arm_db.journal_recognitions(
+        sort=sort, order=order, q=q, limit=limit, offset=offset, from_ts=ft, to_ts=tt
+    )
     return jsonify({"items": rows, "total": total}), 200
 
 
@@ -1079,7 +1143,21 @@ def api_journal_barrier():
     q = (request.args.get("q") or "").strip()
     limit = request.args.get("limit", 100, type=int)
     offset = request.args.get("offset", 0, type=int)
-    rows, total = arm_db.journal_barrier_actions(sort=sort, order=order, q=q, limit=limit, offset=offset)
+    ft, tt = journal_query_time_bounds()
+    rows, total = arm_db.journal_barrier_actions(
+        sort=sort, order=order, q=q, limit=limit, offset=offset, from_ts=ft, to_ts=tt
+    )
+    return jsonify({"items": rows, "total": total}), 200
+
+
+@app.route("/api/journal/visits", methods=["GET"])
+@login_required
+def api_journal_visits():
+    q = (request.args.get("q") or "").strip()
+    limit = request.args.get("limit", 200, type=int)
+    offset = request.args.get("offset", 0, type=int)
+    ft, tt = journal_query_time_bounds()
+    rows, total = arm_db.journal_visits(from_ts=ft, to_ts=tt, q=q, limit=limit, offset=offset)
     return jsonify({"items": rows, "total": total}), 200
 
 

@@ -34,6 +34,35 @@ def get_conn():
         conn.close()
 
 
+def _migrate_schema(conn):
+    """Добавление колонок/таблиц для существующих БД."""
+    rows = conn.execute("PRAGMA table_info(recognition_events)").fetchall()
+    col_names = {r[1] for r in rows}
+    if "visit_id" not in col_names:
+        conn.execute("ALTER TABLE recognition_events ADD COLUMN visit_id INTEGER")
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS vehicle_visits (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            plate_base TEXT NOT NULL,
+            entered_at INTEGER,
+            exited_at INTEGER,
+            duration_seconds INTEGER,
+            exit_without_entry INTEGER NOT NULL DEFAULT 0,
+            entry_user_id INTEGER REFERENCES users(id),
+            exit_user_id INTEGER REFERENCES users(id)
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_vehicle_visits_plate ON vehicle_visits(plate_base)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_vehicle_visits_entered ON vehicle_visits(entered_at DESC)"
+    )
+
+
 def init_db():
     with get_conn() as conn:
         conn.executescript(
@@ -90,6 +119,7 @@ def init_db():
             CREATE INDEX IF NOT EXISTS idx_barrier_created ON barrier_actions(created_at DESC);
             """
         )
+        _migrate_schema(conn)
 
 
 def ensure_default_guard_user():
@@ -154,14 +184,15 @@ def insert_recognition_event(
     source,
     is_duplicate_recent,
     list_status,
+    visit_id=None,
 ):
     now = int(time.time())
     with get_conn() as conn:
         conn.execute(
             """
             INSERT INTO recognition_events
-            (created_at, user_id, direction, plate_base, plate_full, region, confidence, source, is_duplicate_recent, list_status)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (created_at, user_id, direction, plate_base, plate_full, region, confidence, source, is_duplicate_recent, list_status, visit_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 now,
@@ -174,8 +205,81 @@ def insert_recognition_event(
                 source,
                 1 if is_duplicate_recent else 0,
                 list_status,
+                visit_id,
             ),
         )
+
+
+def get_open_visit(plate_base):
+    with get_conn() as conn:
+        return conn.execute(
+            """
+            SELECT id, plate_base, entered_at, exited_at, exit_without_entry
+            FROM vehicle_visits
+            WHERE plate_base = ? AND exited_at IS NULL
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (plate_base,),
+        ).fetchone()
+
+
+def apply_visit_for_recognition(plate_base, user_id, exit_without_entry):
+    """
+    Возвращает (direction, visit_id, duration_seconds, exit_without_entry_applied).
+    direction: 'entry' | 'exit' | 'exit_no_entry'
+    """
+    now = int(time.time())
+    exit_without_entry = bool(exit_without_entry)
+    with get_conn() as conn:
+        open_v = conn.execute(
+            """
+            SELECT id, plate_base, entered_at, exited_at, exit_without_entry
+            FROM vehicle_visits
+            WHERE plate_base = ? AND exited_at IS NULL
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (plate_base,),
+        ).fetchone()
+
+        if open_v:
+            # Нормальный выезд (был зафиксирован въезд)
+            vid = open_v["id"]
+            entered = open_v["entered_at"]
+            dur = None
+            if entered is not None:
+                dur = max(0, now - int(entered))
+            conn.execute(
+                """
+                UPDATE vehicle_visits
+                SET exited_at = ?, duration_seconds = ?, exit_user_id = ?
+                WHERE id = ?
+                """,
+                (now, dur, user_id, vid),
+            )
+            return "exit", vid, dur, False
+
+        if exit_without_entry:
+            cur = conn.execute(
+                """
+                INSERT INTO vehicle_visits
+                (plate_base, entered_at, exited_at, duration_seconds, exit_without_entry, exit_user_id)
+                VALUES (?, NULL, ?, NULL, 1, ?)
+                """,
+                (plate_base, now, user_id),
+            )
+            return "exit_no_entry", cur.lastrowid, None, True
+
+        cur = conn.execute(
+            """
+            INSERT INTO vehicle_visits
+            (plate_base, entered_at, exited_at, duration_seconds, exit_without_entry, entry_user_id)
+            VALUES (?, ?, NULL, NULL, 0, ?)
+            """,
+            (plate_base, now, user_id),
+        )
+        return "entry", cur.lastrowid, None, False
 
 
 def insert_barrier_stub_action(user_id, direction, plate_base, plate_full, note, stub_message):
@@ -238,55 +342,154 @@ def _journal_recognitions_sql(sort, order, q, limit, offset):
     return sort, order, q_like, limit, offset
 
 
-def journal_recognitions(sort="created_at", order="desc", q="", limit=100, offset=0):
+def _time_clause(from_ts, to_ts, alias="r"):
+    if from_ts is None and to_ts is None:
+        return "", []
+    parts = []
+    args = []
+    if from_ts is not None:
+        parts.append(f"{alias}.created_at >= ?")
+        args.append(int(from_ts))
+    if to_ts is not None:
+        parts.append(f"{alias}.created_at <= ?")
+        args.append(int(to_ts))
+    return " AND " + " AND ".join(parts), args
+
+
+def format_duration_human(seconds):
+    if seconds is None:
+        return "—"
+    try:
+        sec = int(seconds)
+    except (TypeError, ValueError):
+        return "—"
+    if sec < 0:
+        sec = 0
+    days, sec = divmod(sec, 86400)
+    hours, sec = divmod(sec, 3600)
+    mins, sec = divmod(sec, 60)
+    parts = []
+    if days:
+        parts.append(f"{days} д")
+    if hours:
+        parts.append(f"{hours} ч")
+    if mins or sec or not parts:
+        parts.append(f"{mins} м")
+    return " ".join(parts)
+
+
+def journal_recognitions(
+    sort="created_at", order="desc", q="", limit=100, offset=0, from_ts=None, to_ts=None
+):
     sort, order, q_like, limit, offset = _journal_recognitions_sql(sort, order, q, limit, offset)
     limit = max(1, min(int(limit), 500))
     offset = max(0, int(offset))
+    tclause, targs = _time_clause(from_ts, to_ts, "r")
     with get_conn() as conn:
         if q_like:
             rows = conn.execute(
                 f"""
                 SELECT r.id, r.created_at, r.direction, r.plate_base, r.plate_full, r.region, r.confidence,
-                       r.source, r.is_duplicate_recent, r.list_status, u.username AS operator
+                       r.source, r.is_duplicate_recent, r.list_status, r.visit_id, u.username AS operator
                 FROM recognition_events r
                 JOIN users u ON u.id = r.user_id
-                WHERE r.plate_base LIKE ? OR r.plate_full LIKE ? OR u.username LIKE ?
+                WHERE (r.plate_base LIKE ? OR r.plate_full LIKE ? OR u.username LIKE ?){tclause}
                 ORDER BY r.{sort} {order}
                 LIMIT ? OFFSET ?
                 """,
-                (q_like, q_like, q_like, limit, offset),
+                (q_like, q_like, q_like, *targs, limit, offset),
             ).fetchall()
             total = conn.execute(
-                """
+                f"""
                 SELECT COUNT(*) AS c FROM recognition_events r
                 JOIN users u ON u.id = r.user_id
-                WHERE r.plate_base LIKE ? OR r.plate_full LIKE ? OR u.username LIKE ?
+                WHERE (r.plate_base LIKE ? OR r.plate_full LIKE ? OR u.username LIKE ?){tclause}
                 """,
-                (q_like, q_like, q_like),
+                (q_like, q_like, q_like, *targs),
             ).fetchone()["c"]
         else:
             rows = conn.execute(
                 f"""
                 SELECT r.id, r.created_at, r.direction, r.plate_base, r.plate_full, r.region, r.confidence,
-                       r.source, r.is_duplicate_recent, r.list_status, u.username AS operator
+                       r.source, r.is_duplicate_recent, r.list_status, r.visit_id, u.username AS operator
                 FROM recognition_events r
                 JOIN users u ON u.id = r.user_id
+                WHERE 1=1{tclause}
                 ORDER BY r.{sort} {order}
                 LIMIT ? OFFSET ?
                 """,
-                (limit, offset),
+                (*targs, limit, offset),
             ).fetchall()
-            total = conn.execute("SELECT COUNT(*) AS c FROM recognition_events").fetchone()["c"]
+            total = conn.execute(
+                f"SELECT COUNT(*) AS c FROM recognition_events r WHERE 1=1{tclause}",
+                tuple(targs),
+            ).fetchone()["c"]
         return [dict(r) for r in rows], total
 
 
-def journal_barrier_actions(sort="created_at", order="desc", q="", limit=100, offset=0):
+def journal_visits(from_ts=None, to_ts=None, q="", limit=200, offset=0):
+    """Визиты: пересечение по времени заезда/выезда с интервалом [from_ts, to_ts]."""
+    limit = max(1, min(int(limit), 500))
+    offset = max(0, int(offset))
+    q_like = f"%{q}%" if (q or "").strip() else None
+    args = []
+    overlap = "1=1"
+    if from_ts is not None or to_ts is not None:
+        ft = int(from_ts) if from_ts is not None else 0
+        tt = int(to_ts) if to_ts is not None else 2**31 - 1
+        overlap = """(
+            (v.entered_at IS NOT NULL AND v.entered_at >= ? AND v.entered_at <= ?)
+            OR (v.exited_at IS NOT NULL AND v.exited_at >= ? AND v.exited_at <= ?)
+            OR (v.exited_at IS NULL AND v.entered_at IS NOT NULL AND v.entered_at >= ? AND v.entered_at <= ?)
+        )"""
+        args.extend([ft, tt, ft, tt, ft, tt])
+    with get_conn() as conn:
+        if q_like:
+            sql = f"""
+                SELECT v.id, v.plate_base, v.entered_at, v.exited_at, v.duration_seconds,
+                       v.exit_without_entry
+                FROM vehicle_visits v
+                WHERE ({overlap}) AND v.plate_base LIKE ?
+                ORDER BY COALESCE(v.exited_at, v.entered_at) DESC
+                LIMIT ? OFFSET ?
+            """
+            rows = conn.execute(sql, (*args, q_like, limit, offset)).fetchall()
+            cnt = conn.execute(
+                f"SELECT COUNT(*) AS c FROM vehicle_visits v WHERE ({overlap}) AND v.plate_base LIKE ?",
+                (*args, q_like),
+            ).fetchone()["c"]
+        else:
+            sql = f"""
+                SELECT v.id, v.plate_base, v.entered_at, v.exited_at, v.duration_seconds,
+                       v.exit_without_entry
+                FROM vehicle_visits v
+                WHERE {overlap}
+                ORDER BY COALESCE(v.exited_at, v.entered_at) DESC
+                LIMIT ? OFFSET ?
+            """
+            rows = conn.execute(sql, (*args, limit, offset)).fetchall()
+            cnt = conn.execute(
+                f"SELECT COUNT(*) AS c FROM vehicle_visits v WHERE {overlap}",
+                tuple(args),
+            ).fetchone()["c"]
+        out = []
+        for r in rows:
+            d = dict(r)
+            d["duration_human"] = format_duration_human(d.get("duration_seconds"))
+            out.append(d)
+        return out, cnt
+
+
+def journal_barrier_actions(
+    sort="created_at", order="desc", q="", limit=100, offset=0, from_ts=None, to_ts=None
+):
     order = "DESC" if str(order).lower() == "desc" else "ASC"
     if sort not in ("created_at", "plate_base", "direction"):
         sort = "created_at"
     q_like = f"%{q}%" if q else None
     limit = max(1, min(int(limit), 500))
     offset = max(0, int(offset))
+    tclause, targs = _time_clause(from_ts, to_ts, "b")
     with get_conn() as conn:
         if q_like:
             rows = conn.execute(
@@ -294,19 +497,19 @@ def journal_barrier_actions(sort="created_at", order="desc", q="", limit=100, of
                 SELECT b.id, b.created_at, b.direction, b.plate_base, b.plate_full, b.note, b.stub_message, u.username AS operator
                 FROM barrier_actions b
                 JOIN users u ON u.id = b.user_id
-                WHERE b.plate_base LIKE ? OR b.plate_full LIKE ? OR u.username LIKE ? OR b.note LIKE ?
+                WHERE (b.plate_base LIKE ? OR b.plate_full LIKE ? OR u.username LIKE ? OR b.note LIKE ?){tclause}
                 ORDER BY b.{sort} {order}
                 LIMIT ? OFFSET ?
                 """,
-                (q_like, q_like, q_like, q_like, limit, offset),
+                (q_like, q_like, q_like, q_like, *targs, limit, offset),
             ).fetchall()
             total = conn.execute(
-                """
+                f"""
                 SELECT COUNT(*) AS c FROM barrier_actions b
                 JOIN users u ON u.id = b.user_id
-                WHERE b.plate_base LIKE ? OR b.plate_full LIKE ? OR u.username LIKE ? OR b.note LIKE ?
+                WHERE (b.plate_base LIKE ? OR b.plate_full LIKE ? OR u.username LIKE ? OR b.note LIKE ?){tclause}
                 """,
-                (q_like, q_like, q_like, q_like),
+                (q_like, q_like, q_like, q_like, *targs),
             ).fetchone()["c"]
         else:
             rows = conn.execute(
@@ -314,10 +517,14 @@ def journal_barrier_actions(sort="created_at", order="desc", q="", limit=100, of
                 SELECT b.id, b.created_at, b.direction, b.plate_base, b.plate_full, b.note, b.stub_message, u.username AS operator
                 FROM barrier_actions b
                 JOIN users u ON u.id = b.user_id
+                WHERE 1=1{tclause}
                 ORDER BY b.{sort} {order}
                 LIMIT ? OFFSET ?
                 """,
-                (limit, offset),
+                (*targs, limit, offset),
             ).fetchall()
-            total = conn.execute("SELECT COUNT(*) AS c FROM barrier_actions").fetchone()["c"]
+            total = conn.execute(
+                f"SELECT COUNT(*) AS c FROM barrier_actions b WHERE 1=1{tclause}",
+                tuple(targs),
+            ).fetchone()["c"]
         return [dict(r) for r in rows], total
