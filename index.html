@@ -31,7 +31,8 @@
             width: 100%;
             height: auto;
             max-height: 400px;
-            object-fit: cover;
+            /* В "прямом захвате" нельзя резать кадр — иначе номер может выпадать из кадра */
+            object-fit: contain;
         }
         #canvasElement {
             display: none;
@@ -57,7 +58,7 @@
     <div class="flex flex-wrap items-start justify-between gap-3 mb-4">
         <div>
             <h1 class="text-3xl font-extrabold text-gray-800 mb-1">АРМ охраны</h1>
-            <p class="text-gray-500 text-sm">Один пост: первое распознавание номера — въезд, следующее — выезд (по данным БД). Легковой формат. Фото только на экране.</p>
+            <p class="text-gray-500 text-sm">Контроль въезда/выезда по номеру. Фото только на экране.</p>
         </div>
         <div class="text-right text-sm">
             <p class="text-gray-600">Оператор: <span id="operatorName" class="font-semibold text-gray-800">—</span></p>
@@ -69,17 +70,7 @@
         <button type="button" class="tab-btn px-4 py-2 rounded-lg font-semibold bg-indigo-600 text-white" data-tab="kpp">КПП / OCR</button>
         <button type="button" class="tab-btn px-4 py-2 rounded-lg font-semibold text-gray-600 hover:bg-gray-100" data-tab="journal">Журнал</button>
         <button type="button" class="tab-btn px-4 py-2 rounded-lg font-semibold text-gray-600 hover:bg-gray-100" data-tab="lists">Списки</button>
-        <button type="button" class="tab-btn px-4 py-2 rounded-lg font-semibold text-gray-600 hover:bg-gray-100" data-tab="roi">Настройка ROI</button>
-    </div>
-
-    <div class="mb-4 p-3 bg-slate-50 rounded-xl border border-slate-200">
-        <label class="flex items-start gap-3 cursor-pointer">
-            <input type="checkbox" id="exitWithoutEntryCheckbox" class="mt-1 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500">
-            <span class="text-sm text-gray-700">
-                <span class="font-semibold text-gray-800">Выезд без записи о въезде</span>
-                — отметьте, если машина выезжает, а въезд не был зафиксирован (например, пропуск кадра). Иначе система сама чередует въезд и выезд по номеру.
-            </span>
-        </label>
+        <button type="button" class="tab-btn px-4 py-2 rounded-lg font-semibold text-gray-600 hover:bg-gray-100" data-tab="roi">Настройки</button>
     </div>
 
     <div id="serviceStatus" class="p-3 bg-yellow-100 text-yellow-700 rounded-lg mb-6 text-center font-medium">
@@ -207,10 +198,6 @@
         <input type="text" id="manualPlateInput" autocomplete="off" spellcheck="false"
                class="w-full px-3 py-2 border border-amber-300 rounded-lg font-mono text-lg uppercase placeholder:normal-case"
                placeholder="Например A111AA или A111AA77">
-        <label class="flex items-start gap-2 cursor-pointer text-sm text-gray-700">
-            <input type="checkbox" id="manualExitWithoutEntryCheckbox" class="mt-1 rounded border-gray-300 text-amber-700 focus:ring-amber-500">
-            <span>Выезд без записи о въезде (для этого ввода)</span>
-        </label>
         <button type="button" id="manualRegisterOnlyBtn"
                 class="w-full px-4 py-2 bg-slate-700 text-white font-semibold rounded-xl hover:bg-slate-800 transition">
             Только зафиксировать визит
@@ -245,10 +232,12 @@
             <p class="text-sm">Ожидается формат госномера: одна буква (А, В, Е, К, М, Н, О, Р, С, Т, У, Х), три цифры, две буквы — не обнаружено.</p>
         </div>
         
-        <p class="text-sm text-gray-600 mt-4 font-medium">Объяснение модели:</p>
-        <p id="explanationOutput" class="text-gray-700 text-xs italic whitespace-normal break-all"></p>
-        <p class="text-sm text-gray-600 mt-3 font-medium">Лог OCR:</p>
-        <p id="ocrLogOutput" class="text-gray-700 text-xs whitespace-normal break-all"></p>
+        <div id="debugOcrBlock">
+            <p class="text-sm text-gray-600 mt-4 font-medium">Объяснение модели:</p>
+            <p id="explanationOutput" class="text-gray-700 text-xs italic whitespace-normal break-all"></p>
+            <p class="text-sm text-gray-600 mt-3 font-medium">Лог OCR:</p>
+            <p id="ocrLogOutput" class="text-gray-700 text-xs whitespace-normal break-all"></p>
+        </div>
 
         <p class="text-sm text-gray-600 mt-6 font-medium">Последний обработанный кадр/файл:</p>
         <img id="imagePreview" src="" alt="Загруженное изображение" class="mt-2 w-full h-auto rounded-lg shadow-md border border-gray-200 object-contain" style="max-height: 400px;">
@@ -420,7 +409,7 @@
 
     <div id="tabRoi" class="hidden space-y-4">
         <div class="p-4 bg-gray-50 rounded-xl border border-gray-200">
-            <h3 class="text-xl font-semibold text-gray-800 mb-2">Настройка зон распознавания (ROI)</h3>
+            <h3 class="text-xl font-semibold text-gray-800 mb-2">Настройки</h3>
             <p class="text-sm text-gray-600">
                 Настрой две зоны: <strong>Въезд</strong> (передний номер до шлагбаума) и <strong>Выезд</strong> (задний номер на территории).
                 Зоны сохраняются и используются автоматически.
@@ -428,11 +417,8 @@
         </div>
 
         <div class="p-4 bg-white rounded-xl border border-gray-200 space-y-3">
-            <label class="block text-sm font-medium text-gray-700">URL камеры (snapshot / RTSP)</label>
-            <input id="roiCameraUrlInput" type="url" placeholder="http://192.168.1.50:8080/shot.jpg"
-                   class="w-full px-3 py-2 border border-gray-300 rounded-lg">
-            <p class="text-xs text-gray-500">
-                Если у тебя <strong>нет IP-камеры</strong>, используй кнопку «Взять кадр из камеры ПК» ниже — URL тогда не нужен.
+            <p class="text-sm text-gray-700">
+                Для настройки ROI используй <strong>камеру ПК</strong>: запусти её в «КПП / OCR», затем нажми «Взять кадр из камеры ПК».
             </p>
 
             <label class="flex items-start gap-3 cursor-pointer">
@@ -444,10 +430,6 @@
             </label>
 
             <div class="flex flex-wrap gap-2">
-                <button id="roiLoadSnapshotBtn" type="button"
-                        class="px-4 py-2 bg-indigo-600 text-white font-semibold rounded-xl shadow hover:bg-indigo-700 transition disabled:opacity-50">
-                    Получить кадр
-                </button>
                 <button id="roiLoadFromBrowserBtn" type="button"
                         class="px-4 py-2 bg-indigo-600 text-white font-semibold rounded-xl shadow hover:bg-indigo-700 transition disabled:opacity-50">
                     Взять кадр из камеры ПК
@@ -515,6 +497,7 @@
     const plateOutput = document.getElementById('plateOutput');
     const explanationOutput = document.getElementById('explanationOutput');
     const ocrLogOutput = document.getElementById('ocrLogOutput');
+    const debugOcrBlock = document.getElementById('debugOcrBlock');
     const plateFullOutput = document.getElementById('plateFullOutput');
     const imagePreview = document.getElementById('imagePreview');
     const errorContainer = document.getElementById('errorContainer');
@@ -564,9 +547,7 @@
     const tabLists = document.getElementById('tabLists');
     const tabRoi = document.getElementById('tabRoi');
 
-    const roiCameraUrlInput = document.getElementById('roiCameraUrlInput');
     const roiEnabledCheckbox = document.getElementById('roiEnabledCheckbox');
-    const roiLoadSnapshotBtn = document.getElementById('roiLoadSnapshotBtn');
     const roiLoadFromBrowserBtn = document.getElementById('roiLoadFromBrowserBtn');
     const roiResetBtn = document.getElementById('roiResetBtn');
     const roiSaveBtn = document.getElementById('roiSaveBtn');
@@ -691,13 +672,8 @@
         return fetch(url, merged);
     }
 
-    function exitWithoutEntryChecked() {
-        const el = document.getElementById('exitWithoutEntryCheckbox');
-        return !!(el && el.checked);
-    }
-
     function ocrPayloadFlags() {
-        return { exit_without_entry: exitWithoutEntryChecked() };
+        return {};
     }
 
     function applyDirectionHint(result) {
@@ -712,9 +688,6 @@
         let t = `В БД: <strong>${result.direction_label || '—'}</strong>`;
         if (result.stay_duration_human) {
             t += ` · на территории: <strong>${result.stay_duration_human}</strong>`;
-        }
-        if (result.exit_without_entry_applied) {
-            t += ' · <span class="text-amber-800">выезд без зафиксированного въезда</span>';
         }
         if (result.dedup_window_minutes != null) {
             t += ` · дубликат OCR, если тот же номер чаще чем раз в <strong>${Number(result.dedup_window_minutes).toFixed(1)}</strong> мин`;
@@ -733,8 +706,8 @@
     function applyKppResultFromApi(result, previewOverride) {
         plateOutput.textContent = (result.plate || '').toUpperCase() || '—';
         plateFullOutput.textContent = result.plate_full ? `Полный номер (с регионом): ${result.plate_full.toUpperCase()}` : '';
-        explanationOutput.textContent = result.model_explanation || result.confidence_explanation || 'Нет дополнительного объяснения.';
-        ocrLogOutput.textContent = result.ocr_log || 'Лог OCR отсутствует.';
+        if (explanationOutput) explanationOutput.textContent = result.model_explanation || result.confidence_explanation || 'Нет дополнительного объяснения.';
+        if (ocrLogOutput) ocrLogOutput.textContent = result.ocr_log || 'Лог OCR отсутствует.';
         if (previewOverride !== undefined) {
             imagePreview.src = previewOverride || '';
         } else if (result.preview_data_url) {
@@ -747,8 +720,6 @@
             lastPlateBase = (result.plate_base || result.plate || '').toUpperCase();
             lastPlateFull = (result.plate_full || result.plate || '').toUpperCase();
             noPlateWarning.classList.add('hidden');
-            const ex = document.getElementById('exitWithoutEntryCheckbox');
-            if (ex) ex.checked = false;
         } else {
             lastPlateBase = '';
             lastPlateFull = '';
@@ -791,7 +762,6 @@
             displayError('Введите номер.');
             return;
         }
-        const exitWithoutEntry = !!(document.getElementById('manualExitWithoutEntryCheckbox')?.checked);
         if (btnOpen) btnOpen.disabled = true;
         if (btnOnly) btnOnly.disabled = true;
         if (st) st.textContent = 'Сохранение…';
@@ -805,7 +775,7 @@
                 method: 'POST',
                 mode: 'cors',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ plate: raw, exit_without_entry: exitWithoutEntry }),
+                body: JSON.stringify({ plate: raw }),
             });
             const result = await r.json().catch(() => ({}));
             if (r.status === 401) {
@@ -816,8 +786,6 @@
                 throw new Error(result.error || `Ошибка: ${r.status}`);
             }
             applyKppResultFromApi(result, '');
-            const mEx = document.getElementById('manualExitWithoutEntryCheckbox');
-            if (mEx) mEx.checked = false;
             if (andOpenBarrier) {
                 barrierStatusText.textContent = 'Отправка команды шлагбаума…';
                 const br = await requestBarrierOpen();
@@ -873,6 +841,7 @@
         loginPanel.classList.remove('hidden');
         armApp.classList.add('hidden');
         currentUserRole = '';
+        if (debugOcrBlock) debugOcrBlock.classList.remove('hidden');
     }
 
     function showArmView(username, role) {
@@ -880,6 +849,9 @@
         armApp.classList.remove('hidden');
         if (operatorName) operatorName.textContent = username || '—';
         currentUserRole = role || '';
+
+        // Guard не должен видеть «Объяснение модели» и «Лог OCR»
+        if (debugOcrBlock) debugOcrBlock.classList.toggle('hidden', !isAdmin());
 
         // Скрываем вкладку ROI для не-админов
         document.querySelectorAll('.tab-btn').forEach((b) => {
@@ -1861,15 +1833,10 @@
             roiState.roi_enabled = !!j.roi_enabled;
             roiState.entry = normRect(j.roi_entry) || null;
             roiState.exit = normRect(j.roi_exit) || null;
-            if (roiCameraUrlInput) roiCameraUrlInput.value = roiState.camera_url;
             if (roiEnabledCheckbox) roiEnabledCheckbox.checked = roiState.roi_enabled;
             roiEnsureDefaults();
             roiRender();
-            if (roiState.camera_url) {
-                roiSetStatus('Готово. Нажми «Получить кадр», чтобы выставить зоны точно по изображению.');
-            } else {
-                roiSetStatus('Укажи URL камеры и нажми «Получить кадр».');
-            }
+            roiSetStatus('Запусти камеру в «КПП / OCR», затем нажми «Взять кадр из камеры ПК».');
         } catch (e) {
             roiSetStatus(e.message || String(e), true);
         }
@@ -1983,38 +1950,6 @@
     if (purgeRunBtn) purgeRunBtn.addEventListener('click', () => void journalAdminPurgeRun());
     if (purgeClearFiltersBtn) purgeClearFiltersBtn.addEventListener('click', journalAdminPurgeClear);
 
-    async function roiLoadSnapshot() {
-        roiSetStatus('');
-        const url = (roiCameraUrlInput?.value || '').trim();
-        if (!url) {
-            roiSetStatus('Укажи URL камеры или используй «Взять кадр из камеры ПК».', true);
-            return;
-        }
-        roiLoadSnapshotBtn.disabled = true;
-        try {
-            const r = await apiFetch(ROI_SNAPSHOT_URL, {
-                method: 'POST',
-                mode: 'cors',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ camera_url: url }),
-            });
-            if (r.status === 401) { showLoginView(); return; }
-            const j = await r.json().catch(() => ({}));
-            if (!r.ok) throw new Error(j.error || `Ошибка: ${r.status}`);
-            roiState.camera_url = j.camera_url || url;
-            roiState.snapshotNatural = { w: Number(j.width || 0), h: Number(j.height || 0) };
-            roiState.snapshotLoaded = true;
-            if (roiSnapshotImg) roiSnapshotImg.src = j.preview_data_url || '';
-            roiSetStatus('Кадр получен. Перетащи и растяни прямоугольники мышкой, затем нажми «Сохранить».');
-            // после загрузки img нужно дождаться layout
-            setTimeout(() => roiRender(), 50);
-        } catch (e) {
-            roiSetStatus(e.message || String(e), true);
-        } finally {
-            roiLoadSnapshotBtn.disabled = false;
-        }
-    }
-
     function roiReset() {
         roiState.entry = null;
         roiState.exit = null;
@@ -2025,7 +1960,6 @@
 
     async function roiSave() {
         roiSetStatus('');
-        const url = (roiCameraUrlInput?.value || '').trim();
         const entry = normRect(roiState.entry);
         const exitR = normRect(roiState.exit);
         if (!entry || !exitR) {
@@ -2035,7 +1969,7 @@
         roiSaveBtn.disabled = true;
         try {
             const payload = {
-                camera_url: url, // может быть пустым, если камера не IP (USB/HDMI capture)
+                camera_url: "",
                 roi_enabled: !!roiEnabledCheckbox?.checked,
                 roi_entry: entry,
                 roi_exit: exitR,
@@ -2049,7 +1983,7 @@
             if (r.status === 401) { showLoginView(); return; }
             const j = await r.json().catch(() => ({}));
             if (!r.ok || !j.ok) throw new Error(j.error || `Ошибка: ${r.status}`);
-            roiState.camera_url = url;
+            roiState.camera_url = "";
             roiState.roi_enabled = !!payload.roi_enabled;
             roiSetStatus('Сохранено. ROI-режим будет применяться автоматически при распознавании.');
         } catch (e) {
@@ -2093,7 +2027,6 @@
         }
     }
 
-    if (roiLoadSnapshotBtn) roiLoadSnapshotBtn.addEventListener('click', () => void roiLoadSnapshot());
     if (roiLoadFromBrowserBtn) roiLoadFromBrowserBtn.addEventListener('click', roiCaptureFromBrowserCamera);
     if (roiResetBtn) roiResetBtn.addEventListener('click', roiReset);
     if (roiSaveBtn) roiSaveBtn.addEventListener('click', () => void roiSave());
