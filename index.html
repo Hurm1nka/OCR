@@ -30,6 +30,7 @@
         #videoFrame {
             width: 100%;
             max-height: 400px;
+            /* Соотношение сторон выставляем динамически по реальному кадру камеры */
             aspect-ratio: 16 / 9;
         }
         #videoElement, #videoElementBg {
@@ -86,8 +87,8 @@
         
         <div id="videoFrame" class="relative w-full max-h-96 rounded-lg bg-black overflow-hidden hidden">
             <video id="videoElementBg" autoplay playsinline muted class="absolute inset-0 w-full h-full object-cover blur-md scale-110"></video>
-            <!-- Основное видео заполняет рамку (масштаб/кадрирование), без чёрных полей -->
-            <video id="videoElement" autoplay playsinline class="relative w-full h-full object-cover"></video>
+            <!-- Основное видео без обрезки; рамка подстраивается под aspect-ratio камеры -->
+            <video id="videoElement" autoplay playsinline class="relative w-full h-full object-contain"></video>
         </div>
         <canvas id="canvasElement"></canvas>
         <canvas id="motionProbeCanvas" width="160" height="90" class="hidden" aria-hidden="true"></canvas>
@@ -1205,6 +1206,7 @@
             currentStream = null;
             startStopText.textContent = 'Запустить Камеру';
             if (videoFrame) videoFrame.classList.add('hidden');
+            if (videoFrame) videoFrame.style.aspectRatio = '16 / 9';
             captureAndProcessButton.disabled = true;
             return;
         }
@@ -1226,6 +1228,19 @@
             if (videoFrame) videoFrame.classList.remove('hidden');
             startStopText.textContent = 'Остановить Камеру';
             captureAndProcessButton.disabled = false;
+
+            // Подстраиваем aspect-ratio рамки под реальный кадр камеры
+            const applyAspect = () => {
+                const vw = videoElement.videoWidth;
+                const vh = videoElement.videoHeight;
+                if (videoFrame && vw && vh) {
+                    videoFrame.style.aspectRatio = `${vw} / ${vh}`;
+                }
+            };
+            videoElement.addEventListener('loadedmetadata', applyAspect, { once: true });
+            // На некоторых браузерах metadata приходит уже сразу
+            applyAspect();
+
             if (motionAutoCheckbox?.checked) {
                 startMotionWatch();
             }
