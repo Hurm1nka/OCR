@@ -1472,10 +1472,7 @@ def barrier_open():
     note = (payload.get("note") or "").strip()[:200]
     plate_base = (payload.get("plate_base") or "").strip().upper()[:16] or None
     plate_full = (payload.get("plate_full") or "").strip().upper()[:24] or None
-    stub_message = (
-        "Имитация: команда «открыть шлагбаум» зарегистрирована в журнале. "
-        "Сервоприводы и реле не подключены."
-    )
+    stub_message = "Команда «открыть шлагбаум» зарегистрирована в журнале."
     logger.info(
         "barrier_open: stub user=%s plate_base=%s",
         session.get("user_id"),
@@ -1513,7 +1510,10 @@ def api_auth_login():
     session["user_id"] = user["id"]
     session["username"] = user["username"]
     session["role"] = user["role"]
-    return jsonify({"ok": True, "username": user["username"], "role": user["role"]}), 200
+    session["full_name"] = user.get("full_name") if isinstance(user, dict) else None
+    return jsonify(
+        {"ok": True, "username": user["username"], "role": user["role"], "full_name": user.get("full_name", "")}
+    ), 200
 
 
 @app.route("/api/auth/logout", methods=["POST"])
@@ -1532,8 +1532,46 @@ def api_auth_me():
             "user_id": session["user_id"],
             "username": session.get("username"),
             "role": session.get("role"),
+            "full_name": session.get("full_name") or "",
         }
     ), 200
+
+
+@app.route("/api/admin/users", methods=["GET"])
+@admin_required
+def api_admin_users_list():
+    items = arm_db.list_users()
+    return jsonify({"items": items}), 200
+
+
+@app.route("/api/admin/users", methods=["POST"])
+@admin_required
+def api_admin_users_create():
+    data = request.get_json(silent=True) or {}
+    username = (data.get("username") or "").strip()
+    password = data.get("password") or ""
+    role = (data.get("role") or "guard").strip().lower()
+    full_name = (data.get("full_name") or "").strip()
+    try:
+        arm_db.create_user(username=username, password=password, role=role, full_name=full_name)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+    return jsonify({"ok": True}), 200
+
+
+@app.route("/api/admin/users/<int:user_id>", methods=["DELETE"])
+@admin_required
+def api_admin_users_delete(user_id):
+    # запрещаем удалять самого себя
+    if session.get("user_id") and int(session["user_id"]) == int(user_id):
+        return jsonify({"error": "Нельзя удалить текущего пользователя"}), 400
+    try:
+        n = arm_db.delete_user(user_id)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+    if not n:
+        return jsonify({"error": "Пользователь не найден"}), 404
+    return jsonify({"ok": True}), 200
 
 
 @app.route("/api/manual/visit", methods=["POST"])

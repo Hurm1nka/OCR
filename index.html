@@ -27,12 +27,14 @@
             0% { transform: rotate(0deg); }
             100% { transform: rotate(360deg); }
         }
-        #videoElement {
+        #videoFrame {
             width: 100%;
-            height: auto;
             max-height: 400px;
-            /* В "прямом захвате" нельзя резать кадр — иначе номер может выпадать из кадра */
-            object-fit: contain;
+            aspect-ratio: 16 / 9;
+        }
+        #videoElement, #videoElementBg {
+            width: 100%;
+            height: 100%;
         }
         #canvasElement {
             display: none;
@@ -82,7 +84,11 @@
     <div id="liveCaptureSection" class="p-4 bg-gray-50 rounded-xl border border-gray-200 mb-6">
         <h3 class="text-xl font-semibold text-gray-700 mb-3">Режим: Прямой захват</h3>
         
-        <video id="videoElement" autoplay playsinline class="w-full max-h-96 rounded-lg bg-black object-cover hidden"></video>
+        <div id="videoFrame" class="relative w-full max-h-96 rounded-lg bg-black overflow-hidden hidden">
+            <video id="videoElementBg" autoplay playsinline muted class="absolute inset-0 w-full h-full object-cover blur-md scale-110"></video>
+            <!-- Основное видео заполняет рамку (масштаб/кадрирование), без чёрных полей -->
+            <video id="videoElement" autoplay playsinline class="relative w-full h-full object-cover"></video>
+        </div>
         <canvas id="canvasElement"></canvas>
         <canvas id="motionProbeCanvas" width="160" height="90" class="hidden" aria-hidden="true"></canvas>
 
@@ -251,7 +257,7 @@
     <div class="mt-6 pt-6 border-t border-gray-200">
         <button id="openBarrierButton"
                 class="w-full px-4 py-3 bg-orange-600 text-white font-semibold rounded-xl shadow-lg hover:bg-orange-700 transition duration-300">
-            Открыть шлагбаум (заглушка)
+            Открыть шлагбаум
         </button>
         <p id="barrierStatusText" class="text-xs text-gray-500 mt-2"></p>
     </div>
@@ -468,6 +474,52 @@
             <p id="purgeStatusLine" class="text-xs text-red-700 mt-3 min-h-[1rem]"></p>
         </div>
 
+        <div id="adminUsersTools" class="p-4 bg-white rounded-xl border border-gray-200 hidden">
+            <h3 class="text-lg font-semibold text-gray-800 mb-2">Операторы</h3>
+            <p class="text-sm text-gray-600 mb-3">Администратор может добавлять/удалять операторов (охранников) и задавать ФИО для отображения.</p>
+
+            <div class="grid grid-cols-1 md:grid-cols-4 gap-2 items-end">
+                <div>
+                    <label class="text-xs text-gray-600">Логин</label>
+                    <input id="adminUserUsername" type="text" class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm" placeholder="guard2">
+                </div>
+                <div class="md:col-span-2">
+                    <label class="text-xs text-gray-600">ФИО</label>
+                    <input id="adminUserFullName" type="text" class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm" placeholder="Гвард Г.И.">
+                </div>
+                <div>
+                    <label class="text-xs text-gray-600">Пароль</label>
+                    <input id="adminUserPassword" type="text" class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm" placeholder="минимум 4 символа">
+                </div>
+            </div>
+            <div class="flex flex-wrap gap-2 mt-3">
+                <button id="adminUserAddBtn" type="button"
+                        class="px-4 py-2 bg-slate-800 text-white font-semibold rounded-xl shadow hover:bg-slate-900 transition">
+                    Добавить охранника
+                </button>
+                <button id="adminUsersRefreshBtn" type="button"
+                        class="px-4 py-2 bg-slate-600 text-white font-semibold rounded-xl shadow hover:bg-slate-700 transition">
+                    Обновить список
+                </button>
+                <p id="adminUsersStatus" class="ml-auto text-xs text-gray-600 min-h-[1rem]"></p>
+            </div>
+
+            <div class="mt-3 overflow-x-auto border border-gray-200 rounded-xl">
+                <table class="min-w-full text-sm text-left">
+                    <thead class="bg-gray-100 text-gray-700">
+                        <tr>
+                            <th class="p-2">Логин</th>
+                            <th class="p-2">ФИО</th>
+                            <th class="p-2">Роль</th>
+                            <th class="p-2">Создан</th>
+                            <th class="p-2">Удал.</th>
+                        </tr>
+                    </thead>
+                    <tbody id="adminUsersBody"></tbody>
+                </table>
+            </div>
+        </div>
+
         <div class="p-3 bg-amber-50 border border-amber-200 rounded-xl text-sm text-amber-900">
             Подсказка: не включай в ROI лишние области (КПП, шлагбаум, фон). Чем меньше лишнего — тем стабильнее OCR.
         </div>
@@ -509,6 +561,8 @@
     const barrierStatusText = document.getElementById('barrierStatusText');
 
     const videoElement = document.getElementById('videoElement');
+    const videoElementBg = document.getElementById('videoElementBg');
+    const videoFrame = document.getElementById('videoFrame');
     const canvasElement = document.getElementById('canvasElement');
     const startCameraButton = document.getElementById('startCameraButton');
     const startStopText = document.getElementById('startStopText');
@@ -570,6 +624,14 @@
     const purgeRunBtn = document.getElementById('purgeRunBtn');
     const purgeClearFiltersBtn = document.getElementById('purgeClearFiltersBtn');
     const journalPurgeStatus = document.getElementById('journalPurgeStatus');
+    const adminUsersTools = document.getElementById('adminUsersTools');
+    const adminUserUsername = document.getElementById('adminUserUsername');
+    const adminUserFullName = document.getElementById('adminUserFullName');
+    const adminUserPassword = document.getElementById('adminUserPassword');
+    const adminUserAddBtn = document.getElementById('adminUserAddBtn');
+    const adminUsersRefreshBtn = document.getElementById('adminUsersRefreshBtn');
+    const adminUsersStatus = document.getElementById('adminUsersStatus');
+    const adminUsersBody = document.getElementById('adminUsersBody');
 
     function pageDirectoryBaseHref() {
         const u = new URL(window.location.href);
@@ -606,6 +668,7 @@
     let ROI_SNAPSHOT_URL;
     let ADMIN_PURGE_URL;
     let ADMIN_DELETE_URL;
+    let ADMIN_USERS_URL;
 
     const q = API_FROM_QUERY && API_FROM_QUERY.trim();
     const m = API_FROM_META && API_FROM_META.trim();
@@ -636,6 +699,7 @@
     ROI_SNAPSHOT_URL = `${API_BASE}/api/camera/snapshot`;
     ADMIN_PURGE_URL = `${API_BASE}/api/admin/purge`;
     ADMIN_DELETE_URL = `${API_BASE}/api/admin/delete`;
+    ADMIN_USERS_URL = `${API_BASE}/api/admin/users`;
 
     let currentStream = null;
     let ipLiveTimer = null;
@@ -789,8 +853,8 @@
             if (andOpenBarrier) {
                 barrierStatusText.textContent = 'Отправка команды шлагбаума…';
                 const br = await requestBarrierOpen();
-                barrierStatusText.textContent = br.message || 'Событие записано в журнал (имитация).';
-                if (st) st.textContent = 'Визит записан, шлагбаум — имитация (см. статус ниже).';
+                barrierStatusText.textContent = 'Команда открытия зарегистрирована в журнале.';
+                if (st) st.textContent = 'Визит записан.';
             } else {
                 barrierStatusText.textContent = '';
                 if (st) st.textContent = 'Визит записан в журнал.';
@@ -844,10 +908,10 @@
         if (debugOcrBlock) debugOcrBlock.classList.remove('hidden');
     }
 
-    function showArmView(username, role) {
+    function showArmView(username, role, fullName) {
         loginPanel.classList.add('hidden');
         armApp.classList.remove('hidden');
-        if (operatorName) operatorName.textContent = username || '—';
+        if (operatorName) operatorName.textContent = (fullName || '').trim() || username || '—';
         currentUserRole = role || '';
 
         // Guard не должен видеть «Объяснение модели» и «Лог OCR»
@@ -1140,7 +1204,7 @@
             currentStream.getTracks().forEach(track => track.stop());
             currentStream = null;
             startStopText.textContent = 'Запустить Камеру';
-            videoElement.classList.add('hidden');
+            if (videoFrame) videoFrame.classList.add('hidden');
             captureAndProcessButton.disabled = true;
             return;
         }
@@ -1154,8 +1218,12 @@
                 currentStream = await navigator.mediaDevices.getUserMedia({ video: true });
             }
             videoElement.srcObject = currentStream;
+            if (videoElementBg) videoElementBg.srcObject = currentStream;
             videoElement.play();
-            videoElement.classList.remove('hidden');
+            if (videoElementBg) {
+                try { videoElementBg.play(); } catch (e) { /* ignore */ }
+            }
+            if (videoFrame) videoFrame.classList.remove('hidden');
             startStopText.textContent = 'Остановить Камеру';
             captureAndProcessButton.disabled = false;
             if (motionAutoCheckbox?.checked) {
@@ -1291,7 +1359,7 @@
             const r = await apiFetch(AUTH_ME_URL, { method: 'GET', mode: 'cors' });
             const j = await r.json().catch(() => ({}));
             if (j.authenticated) {
-                showArmView(j.username, j.role);
+                showArmView(j.username, j.role, j.full_name);
                 return true;
             }
         } catch (e) {
@@ -1819,6 +1887,7 @@
         if (!tabRoi) return;
         roiSetStatus('');
         if (adminDbTools) adminDbTools.classList.toggle('hidden', !isAdmin());
+        if (adminUsersTools) adminUsersTools.classList.toggle('hidden', !isAdmin());
         try {
             const r = await apiFetch(ROI_SETTINGS_URL, { method: 'GET', mode: 'cors' });
             if (r.status === 401) { showLoginView(); return; }
@@ -1837,10 +1906,102 @@
             roiEnsureDefaults();
             roiRender();
             roiSetStatus('Запусти камеру в «КПП / OCR», затем нажми «Взять кадр из камеры ПК».');
+            if (isAdmin()) void adminUsersLoad();
         } catch (e) {
             roiSetStatus(e.message || String(e), true);
         }
     }
+
+    function adminUsersSetStatus(msg, isError = false) {
+        if (!adminUsersStatus) return;
+        adminUsersStatus.textContent = msg || '';
+        adminUsersStatus.classList.toggle('text-red-700', !!isError);
+        adminUsersStatus.classList.toggle('text-gray-600', !isError);
+    }
+
+    async function adminUsersLoad() {
+        if (!isAdmin() || !adminUsersBody) return;
+        adminUsersSetStatus('');
+        const r = await apiFetch(ADMIN_USERS_URL, { method: 'GET', mode: 'cors' });
+        if (r.status === 401) { showLoginView(); return; }
+        const j = await r.json().catch(() => ({ items: [] }));
+        if (!r.ok) {
+            adminUsersSetStatus(j.error || `Ошибка: ${r.status}`, true);
+            return;
+        }
+        adminUsersBody.innerHTML = '';
+        (j.items || []).forEach((u) => {
+            const tr = document.createElement('tr');
+            tr.className = 'border-t border-gray-100';
+            const a = document.createElement('td');
+            a.className = 'p-2 font-mono';
+            a.textContent = u.username || '';
+            const b = document.createElement('td');
+            b.className = 'p-2';
+            b.textContent = u.full_name || '';
+            const c = document.createElement('td');
+            c.className = 'p-2';
+            c.textContent = u.role || '';
+            const d = document.createElement('td');
+            d.className = 'p-2 text-xs whitespace-nowrap';
+            d.textContent = u.created_at ? fmtTs(u.created_at) : '—';
+            const e = document.createElement('td');
+            e.className = 'p-2';
+            const del = document.createElement('button');
+            del.type = 'button';
+            del.className = 'text-red-600 text-xs font-semibold hover:underline';
+            del.textContent = 'Удал.';
+            del.disabled = (u.username === 'admin'); // не даём удалить admin из UI
+            del.addEventListener('click', async () => {
+                const ok = confirm(`Удалить пользователя ${u.username}?`);
+                if (!ok) return;
+                const rr = await apiFetch(`${ADMIN_USERS_URL}/${u.id}`, { method: 'DELETE', mode: 'cors' });
+                if (rr.status === 401) { showLoginView(); return; }
+                const jj = await rr.json().catch(() => ({}));
+                if (!rr.ok) {
+                    alert(jj.error || `Ошибка: ${rr.status}`);
+                    return;
+                }
+                void adminUsersLoad();
+            });
+            e.appendChild(del);
+            tr.append(a, b, c, d, e);
+            adminUsersBody.appendChild(tr);
+        });
+        adminUsersSetStatus(`Пользователей: ${(j.items || []).length}`);
+    }
+
+    async function adminUserAdd() {
+        if (!isAdmin()) return;
+        adminUsersSetStatus('');
+        const username = (adminUserUsername?.value || '').trim();
+        const full_name = (adminUserFullName?.value || '').trim();
+        const password = (adminUserPassword?.value || '').trim();
+        if (!username || !password) {
+            adminUsersSetStatus('Нужны логин и пароль.', true);
+            return;
+        }
+        const r = await apiFetch(ADMIN_USERS_URL, {
+            method: 'POST',
+            mode: 'cors',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ username, full_name, password, role: 'guard' }),
+        });
+        if (r.status === 401) { showLoginView(); return; }
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok || !j.ok) {
+            adminUsersSetStatus(j.error || `Ошибка: ${r.status}`, true);
+            return;
+        }
+        if (adminUserUsername) adminUserUsername.value = '';
+        if (adminUserFullName) adminUserFullName.value = '';
+        if (adminUserPassword) adminUserPassword.value = '';
+        adminUsersSetStatus('Охранник добавлен.');
+        void adminUsersLoad();
+    }
+
+    if (adminUserAddBtn) adminUserAddBtn.addEventListener('click', () => void adminUserAdd());
+    if (adminUsersRefreshBtn) adminUsersRefreshBtn.addEventListener('click', () => void adminUsersLoad());
 
     function purgeSetStatus(msg, isError = false) {
         if (!purgeStatusLine) return;
@@ -2058,7 +2219,7 @@
                 loginError.classList.remove('hidden');
                 return;
             }
-            showArmView(j.username, j.role);
+            showArmView(j.username, j.role, j.full_name);
             await checkServiceStatus();
         } catch (e) {
             loginError.textContent = e.message || 'Сеть недоступна';
@@ -2219,7 +2380,7 @@
         openBarrierButton.disabled = true;
         try {
             const result = await requestBarrierOpen();
-            barrierStatusText.textContent = result.message || 'Событие записано в журнал (имитация).';
+            barrierStatusText.textContent = 'Команда открытия зарегистрирована в журнале.';
         } catch (err) {
             barrierStatusText.textContent = 'Не удалось открыть шлагбаум.';
             displayError(`Ошибка команды шлагбаума: ${err.message}`);

@@ -41,6 +41,12 @@ def _migrate_schema(conn):
     if "visit_id" not in col_names:
         conn.execute("ALTER TABLE recognition_events ADD COLUMN visit_id INTEGER")
 
+    # users.full_name (ФИО оператора)
+    ucols = conn.execute("PRAGMA table_info(users)").fetchall()
+    ucol_names = {r[1] for r in ucols}
+    if "full_name" not in ucol_names:
+        conn.execute("ALTER TABLE users ADD COLUMN full_name TEXT")
+
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS vehicle_visits (
@@ -194,8 +200,8 @@ def ensure_default_guard_user():
             h = generate_password_hash(initial_password)
             now = int(time.time())
             conn.execute(
-                "INSERT INTO users (username, password_hash, role, created_at) VALUES (?, ?, ?, ?)",
-                ("guard", h, "guard", now),
+                "INSERT INTO users (username, password_hash, role, created_at, full_name) VALUES (?, ?, ?, ?, ?)",
+                ("guard", h, "guard", now, "Охранник"),
             )
 
 
@@ -213,8 +219,8 @@ def ensure_default_admin_user():
             h = generate_password_hash(initial_password)
             now = int(time.time())
             conn.execute(
-                "INSERT INTO users (username, password_hash, role, created_at) VALUES (?, ?, ?, ?)",
-                ("admin", h, "admin", now),
+                "INSERT INTO users (username, password_hash, role, created_at, full_name) VALUES (?, ?, ?, ?, ?)",
+                ("admin", h, "admin", now, "Администратор"),
             )
 
 
@@ -292,7 +298,7 @@ def delete_visit(visit_id):
 def get_user_by_username(username):
     with get_conn() as conn:
         return conn.execute(
-            "SELECT id, username, password_hash, role FROM users WHERE username = ?",
+            "SELECT id, username, password_hash, role, full_name FROM users WHERE username = ?",
             (username,),
         ).fetchone()
 
@@ -303,7 +309,45 @@ def verify_login(username, password):
         return None
     if not check_password_hash(row["password_hash"], password):
         return None
-    return {"id": row["id"], "username": row["username"], "role": row["role"]}
+    return {
+        "id": row["id"],
+        "username": row["username"],
+        "role": row["role"],
+        "full_name": row.get("full_name") if hasattr(row, "get") else row["full_name"],
+    }
+
+
+def list_users():
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT id, username, role, full_name, created_at FROM users ORDER BY role DESC, username ASC"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def create_user(username, password, role, full_name):
+    username = (username or "").strip()
+    full_name = (full_name or "").strip()
+    role = (role or "").strip().lower()
+    if not username:
+        raise ValueError("username обязателен")
+    if role not in ("guard", "admin"):
+        raise ValueError("role: guard или admin")
+    if not password or len(str(password)) < 4:
+        raise ValueError("password минимум 4 символа")
+    h = generate_password_hash(str(password))
+    now = int(time.time())
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT INTO users (username, password_hash, role, created_at, full_name) VALUES (?, ?, ?, ?, ?)",
+            (username, h, role, now, full_name or None),
+        )
+
+
+def delete_user(user_id):
+    with get_conn() as conn:
+        cur = conn.execute("DELETE FROM users WHERE id = ?", (int(user_id),))
+        return cur.rowcount
 
 
 def resolve_list_status(plate_base):
