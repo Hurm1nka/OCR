@@ -6,6 +6,7 @@ import datetime as dt
 import ipaddress
 import threading
 import functools
+import json
 import cv2
 import numpy as np
 import base64
@@ -41,6 +42,7 @@ logging.getLogger("ppocr").setLevel(logging.ERROR)
 try:
     arm_db.init_db()
     arm_db.ensure_default_guard_user()
+    arm_db.ensure_default_admin_user()
 except Exception:
     logger.exception("SQLite init failed")
 
@@ -171,6 +173,153 @@ DEDUP_WINDOW_SECONDS = _dedup_window_seconds()
 DEDUP_WINDOW_MINUTES = DEDUP_WINDOW_SECONDS / 60.0
 recent_plate_events = {}
 recent_plate_events_lock = threading.Lock()
+
+# =================================================================
+# ROI / НАПРАВЛЕНИЕ (въезд/выезд) по зонам кадра
+# =================================================================
+
+# Подтверждение события: сколько раз номер должен встретиться в одной ROI за короткое окно,
+# чтобы считаться "реальным", а не разовым ложным OCR.
+ROI_CONFIRM_HITS = max(1, int(float(os.getenv("ROI_CONFIRM_HITS", "2"))))
+ROI_CONFIRM_WINDOW_SECONDS = max(0.2, float(os.getenv("ROI_CONFIRM_WINDOW_SECONDS", "2.5")))
+
+# Лок направления: если номер подтвержден как "entry"/"exit", не даём ему сменить направление
+# в течение окна (защита от дребезга и пересечения ROI одной машиной).
+ROI_DIRECTION_LOCK_SECONDS = max(1.0, float(os.getenv("ROI_DIRECTION_LOCK_SECONDS", "12")))
+
+# Минимальная уверенность OCR для принятия результата в ROI-режиме.
+ROI_MIN_CONFIDENCE = float(os.getenv("ROI_MIN_CONFIDENCE", "0.70"))
+
+_roi_hits = {}  # (plate_base, roi_code) -> [ts...]
+_roi_hits_lock = threading.Lock()
+_plate_dir_lock = {}  # plate_base -> (direction, ts)
+_plate_dir_lock_lock = threading.Lock()
+
+
+def _parse_roi_rect(value):
+    """
+    ROI прямоугольник: [x1,y1,x2,y2] или "x1,y1,x2,y2".
+    Допускает нормализованные координаты (0..1) и пиксельные.
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        s = value.strip()
+        if not s:
+            return None
+        parts = [p.strip() for p in s.replace(";", ",").split(",")]
+        if len(parts) != 4:
+            return None
+        try:
+            nums = [float(p) for p in parts]
+        except ValueError:
+            return None
+        return nums
+    if isinstance(value, (list, tuple)) and len(value) == 4:
+        try:
+            return [float(x) for x in value]
+        except Exception:
+            return None
+    return None
+
+
+def _roi_to_pixels(roi, w, h):
+    """Перевод ROI в пиксели. Если все значения <= 1.0 — считаем нормализованными."""
+    if not roi:
+        return None
+    x1, y1, x2, y2 = roi
+    if max(abs(x1), abs(y1), abs(x2), abs(y2)) <= 1.0:
+        x1 *= w
+        x2 *= w
+        y1 *= h
+        y2 *= h
+    x1i = int(max(0, min(w - 1, round(x1))))
+    x2i = int(max(0, min(w, round(x2))))
+    y1i = int(max(0, min(h - 1, round(y1))))
+    y2i = int(max(0, min(h, round(y2))))
+    if x2i <= x1i or y2i <= y1i:
+        return None
+    return x1i, y1i, x2i, y2i
+
+
+def crop_image_by_roi(img_bgr, roi_rect):
+    if img_bgr is None or roi_rect is None:
+        return None
+    h, w = img_bgr.shape[:2]
+    px = _roi_to_pixels(roi_rect, w, h)
+    if not px:
+        return None
+    x1, y1, x2, y2 = px
+    crop = img_bgr[y1:y2, x1:x2]
+    return crop if crop is not None and getattr(crop, "size", 0) else None
+
+
+def _prune_roi_hits(now_ts):
+    cutoff = now_ts - ROI_CONFIRM_WINDOW_SECONDS
+    stale_keys = []
+    for k, ts_list in _roi_hits.items():
+        _roi_hits[k] = [t for t in ts_list if t >= cutoff]
+        if not _roi_hits[k]:
+            stale_keys.append(k)
+    for k in stale_keys:
+        _roi_hits.pop(k, None)
+
+
+def register_roi_hit_and_confirm(plate_base, roi_code):
+    """
+    Возвращает True, если попадание подтверждено (>= ROI_CONFIRM_HITS в окне).
+    roi_code: 'entry'|'exit'
+    """
+    now_ts = time.time()
+    with _roi_hits_lock:
+        _prune_roi_hits(now_ts)
+        key = (plate_base, roi_code)
+        ts_list = _roi_hits.get(key) or []
+        ts_list.append(now_ts)
+        # ограничим рост списка
+        ts_list = ts_list[-max(ROI_CONFIRM_HITS, 5):]
+        _roi_hits[key] = ts_list
+        return len(ts_list) >= ROI_CONFIRM_HITS
+
+
+def get_locked_direction(plate_base):
+    now_ts = time.time()
+    with _plate_dir_lock_lock:
+        v = _plate_dir_lock.get(plate_base)
+        if not v:
+            return None
+        direction, ts = v
+        if now_ts - ts > ROI_DIRECTION_LOCK_SECONDS:
+            _plate_dir_lock.pop(plate_base, None)
+            return None
+        return direction
+
+
+def lock_direction(plate_base, direction):
+    with _plate_dir_lock_lock:
+        _plate_dir_lock[plate_base] = (direction, time.time())
+
+
+def _load_saved_roi_settings():
+    """
+    Достаёт ROI из БД (как JSON строки) и возвращает (camera_url, roi_entry_rect, roi_exit_rect, roi_enabled).
+    """
+    try:
+        cam_url, roi_entry_s, roi_exit_s, roi_enabled = arm_db.get_roi_settings()
+    except Exception:
+        logger.exception("get_roi_settings failed")
+        return "", None, None, False
+
+    def _parse_json_rect(s):
+        if not s:
+            return None
+        try:
+            v = json.loads(s)
+        except Exception:
+            return None
+        return _parse_roi_rect(v)
+
+    return cam_url or "", _parse_json_rect(roi_entry_s), _parse_json_rect(roi_exit_s), bool(roi_enabled)
 
 # =================================================================
 # ЛОГИКА КОРРЕКЦИИ
@@ -336,6 +485,18 @@ def login_required(view):
     return wrapped
 
 
+def admin_required(view):
+    @functools.wraps(view)
+    def wrapped(*args, **kwargs):
+        if not session.get("user_id"):
+            return jsonify({"error": "Требуется вход в систему"}), 401
+        if (session.get("role") or "").lower() != "admin":
+            return jsonify({"error": "Требуются права администратора"}), 403
+        return view(*args, **kwargs)
+
+    return wrapped
+
+
 def plate_base_from_user_string(s):
     """Нормализация ввода для белого/чёрного списка (легковой формат)."""
     if not s:
@@ -418,11 +579,60 @@ def recognition_sidecar(plate, data):
     if not plate:
         return None, None, None, None, None, False
     exit_wo = bool(data.get("exit_without_entry"))
-    direction, visit_id, dur_sec, exit_applied = arm_db.apply_visit_for_recognition(
-        plate, session["user_id"], exit_wo
-    )
+    forced = (data.get("forced_direction") or "").strip().lower()
+    if forced in ("entry", "exit"):
+        direction, visit_id, dur_sec, exit_applied = arm_db.apply_visit_forced_direction(
+            plate, session["user_id"], forced, exit_wo
+        )
+    else:
+        direction, visit_id, dur_sec, exit_applied = arm_db.apply_visit_for_recognition(
+            plate, session["user_id"], exit_wo
+        )
     dh = arm_db.format_duration_human(dur_sec) if dur_sec is not None else None
     return direction, visit_id, dur_sec, dh, direction_label_ru(direction), exit_applied
+
+
+def process_ocr_with_rois(img_bgr, roi_entry, roi_exit):
+    """
+    OCR отдельно по двум ROI. Возвращает:
+    {
+      "best": {"plate","region","conf","roi"} | None,
+      "entry": {...} | None,
+      "exit": {...} | None
+    }
+    """
+    out = {"best": None, "entry": None, "exit": None}
+    candidates = []
+    for code, roi in (("entry", roi_entry), ("exit", roi_exit)):
+        crop = crop_image_by_roi(img_bgr, roi)
+        if crop is None:
+            continue
+        model_expl, ocr_log, plate, region, conf = process_ocr_pipeline(crop)
+        if plate and conf is not None and float(conf) >= ROI_MIN_CONFIDENCE:
+            rec = {
+                "roi": code,
+                "plate": plate,
+                "region": region or "",
+                "conf": float(conf),
+                "model_explanation": model_expl,
+                "ocr_log": ocr_log,
+            }
+            out[code] = rec
+            candidates.append(rec)
+        else:
+            # Для отладки в ответах можно будет показывать последние логи
+            out[code] = {
+                "roi": code,
+                "plate": plate or "",
+                "region": region or "",
+                "conf": float(conf or 0.0),
+                "model_explanation": model_expl,
+                "ocr_log": ocr_log,
+            }
+
+    if candidates:
+        out["best"] = max(candidates, key=lambda r: r.get("conf", 0.0))
+    return out
 
 
 def duplicate_flag_for_report(is_duplicate_recent, auto_direction):
@@ -856,6 +1066,88 @@ def index_page():
     return resp
 
 
+@app.route("/api/settings/roi", methods=["GET"])
+@admin_required
+def api_settings_roi_get():
+    cam_url, roi_entry, roi_exit, roi_enabled = _load_saved_roi_settings()
+    return jsonify(
+        {
+            "camera_url": cam_url,
+            "roi_entry": roi_entry,
+            "roi_exit": roi_exit,
+            "roi_enabled": bool(roi_enabled),
+        }
+    ), 200
+
+
+@app.route("/api/settings/roi", methods=["POST"])
+@admin_required
+def api_settings_roi_set():
+    data = request.get_json(silent=True) or {}
+    cam_url = normalize_camera_url((data.get("camera_url") or "").strip())
+    roi_enabled = bool(data.get("roi_enabled"))
+    roi_entry = _parse_roi_rect(data.get("roi_entry"))
+    roi_exit = _parse_roi_rect(data.get("roi_exit"))
+
+    def _clamp01_rect(r):
+        if not r:
+            return None
+        x1, y1, x2, y2 = r
+        # если значения выглядят пиксельными — запрещаем сохранять в таком виде,
+        # потому что настройки должны быть переносимыми; фронт отправляет 0..1.
+        if max(abs(x1), abs(y1), abs(x2), abs(y2)) > 1.0:
+            raise ValueError("ROI must be normalized (0..1).")
+        x1 = max(0.0, min(1.0, float(x1)))
+        y1 = max(0.0, min(1.0, float(y1)))
+        x2 = max(0.0, min(1.0, float(x2)))
+        y2 = max(0.0, min(1.0, float(y2)))
+        if x2 <= x1 or y2 <= y1:
+            raise ValueError("ROI rectangle is invalid.")
+        return [x1, y1, x2, y2]
+
+    try:
+        roi_entry_n = _clamp01_rect(roi_entry) if roi_entry else None
+        roi_exit_n = _clamp01_rect(roi_exit) if roi_exit else None
+        arm_db.set_roi_settings(
+            cam_url,
+            json.dumps(roi_entry_n) if roi_entry_n else "",
+            json.dumps(roi_exit_n) if roi_exit_n else "",
+            roi_enabled,
+        )
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+
+    return jsonify({"ok": True}), 200
+
+
+@app.route("/api/camera/snapshot", methods=["POST"])
+@admin_required
+def api_camera_snapshot():
+    data = request.get_json(silent=True) or {}
+    camera_url = normalize_camera_url((data.get("camera_url") or "").strip())
+    if not camera_url:
+        # если не передали — пробуем из сохранённых настроек
+        camera_url, _re, _rx, _en = _load_saved_roi_settings()
+    if not camera_url:
+        return jsonify({"error": "camera_url не указан"}), 400
+
+    try:
+        img, preview_bytes = fetch_image_for_ip_camera(camera_url)
+        h, w = img.shape[:2]
+        preview_b64 = base64.b64encode(preview_bytes).decode("utf-8")
+        return jsonify(
+            {
+                "camera_url": camera_url,
+                "width": int(w),
+                "height": int(h),
+                "preview_data_url": f"data:image/jpeg;base64,{preview_b64}",
+            }
+        ), 200
+    except Exception as e:
+        logger.exception("snapshot failed")
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route('/process', methods=['POST'])
 @login_required
 def process_data():
@@ -874,15 +1166,68 @@ def process_data():
         image_bytes = base64.b64decode(base64_img)
         img = decode_image_from_bytes(image_bytes)
 
-        model_explanation, ocr_log, plate, region, conf = process_ocr_pipeline(img)
-        logger.info("process: plate=%r region=%r conf=%.4f", plate, region, conf)
+        # ROI-режим (две зоны): если переданы roi_entry/roi_exit или включен ROI_ENABLED
+        roi_enabled = bool(data.get("roi_enabled")) or (os.getenv("ROI_ENABLED", "").strip() == "1")
+        roi_entry = _parse_roi_rect(data.get("roi_entry") or os.getenv("ROI_ENTRY"))
+        roi_exit = _parse_roi_rect(data.get("roi_exit") or os.getenv("ROI_EXIT"))
+        if roi_enabled and not (roi_entry or roi_exit):
+            _cam, saved_entry, saved_exit, saved_enabled = _load_saved_roi_settings()
+            if saved_enabled:
+                roi_entry = roi_entry or saved_entry
+                roi_exit = roi_exit or saved_exit
+
+        roi_result = None
+        forced_direction = None
+        roi_used = ""
+
+        if roi_enabled and (roi_entry or roi_exit):
+            roi_result = process_ocr_with_rois(img, roi_entry, roi_exit)
+            best = roi_result.get("best")
+            if best:
+                plate = best["plate"]
+                region = best.get("region") or ""
+                conf = float(best.get("conf") or 0.0)
+                roi_used = best.get("roi") or ""
+                model_explanation = best.get("model_explanation") or ""
+                ocr_log = best.get("ocr_log") or ""
+
+                locked = get_locked_direction(plate)
+                roi_dir = roi_used if roi_used in ("entry", "exit") else None
+                if locked in ("entry", "exit"):
+                    forced_direction = locked
+                else:
+                    forced_direction = roi_dir
+
+                if forced_direction in ("entry", "exit"):
+                    confirmed = register_roi_hit_and_confirm(plate, forced_direction)
+                    if not confirmed:
+                        plate = None
+                        region = ""
+                        conf = 0.0
+                        forced_direction = None
+                        roi_used = ""
+            else:
+                plate = None
+                region = ""
+                conf = 0.0
+                model_explanation = "Шаблон номера РФ не обнаружен (ROI)."
+                ocr_log = (roi_result.get("entry", {}) or {}).get("ocr_log", "")
+        else:
+            model_explanation, ocr_log, plate, region, conf = process_ocr_pipeline(img)
+
+        logger.info("process: plate=%r region=%r conf=%.4f roi=%s", plate, region, float(conf or 0.0), roi_used)
         full_plate = f"{plate}{region}" if plate else ""
         is_duplicate_recent = mark_plate_event_and_check_duplicate(plate) if plate else False
         list_status = arm_db.resolve_list_status(plate) if plate else "none"
         auto_dir = visit_id = dur_sec = dur_human = dir_label = None
         exit_wo_applied = False
         if plate:
+            if forced_direction in ("entry", "exit"):
+                data = dict(data)
+                data["forced_direction"] = forced_direction
             auto_dir, visit_id, dur_sec, dur_human, dir_label, exit_wo_applied = recognition_sidecar(plate, data)
+            if forced_direction in ("entry", "exit"):
+                lock_direction(plate, forced_direction)
             dup_report = duplicate_flag_for_report(is_duplicate_recent, auto_dir)
             log_recognition_event(
                 session["user_id"],
@@ -911,6 +1256,8 @@ def process_data():
                 "stay_duration_seconds": dur_sec,
                 "stay_duration_human": dur_human,
                 "exit_without_entry_applied": exit_wo_applied,
+                "roi_used": roi_used,
+                "roi_mode": bool(roi_enabled and (roi_entry or roi_exit)),
             }
             attach_ocr_meta(res, duplicate_flag_for_report(is_duplicate_recent, auto_dir), list_status)
         else:
@@ -922,8 +1269,29 @@ def process_data():
                 "confidence_explanation": "Не найдено.",
                 "model_explanation": model_explanation,
                 "ocr_log": ocr_log,
+                "roi_used": roi_used,
+                "roi_mode": bool(roi_enabled and (roi_entry or roi_exit)),
             }
             attach_ocr_meta(res, False, "none")
+
+        if roi_result is not None:
+            try:
+                res["roi_debug"] = {
+                    "entry": {
+                        "plate": (roi_result.get("entry") or {}).get("plate", ""),
+                        "conf": float((roi_result.get("entry") or {}).get("conf", 0.0)),
+                    },
+                    "exit": {
+                        "plate": (roi_result.get("exit") or {}).get("plate", ""),
+                        "conf": float((roi_result.get("exit") or {}).get("conf", 0.0)),
+                    },
+                    "confirm_hits": ROI_CONFIRM_HITS,
+                    "confirm_window_s": ROI_CONFIRM_WINDOW_SECONDS,
+                    "lock_s": ROI_DIRECTION_LOCK_SECONDS,
+                    "min_conf": ROI_MIN_CONFIDENCE,
+                }
+            except Exception:
+                pass
 
         return jsonify(res), 200
 
@@ -944,15 +1312,76 @@ def process_ip_camera():
     try:
         logger.info("process_ip_camera: fetching frame from %s", camera_url)
         img, preview_bytes = fetch_image_for_ip_camera(camera_url)
-        model_explanation, ocr_log, plate, region, conf = process_ocr_pipeline(img)
-        logger.info("process_ip_camera: plate=%r region=%r conf=%.4f", plate, region, conf)
+        # ROI-режим (две зоны): если переданы roi_entry/roi_exit или включен ROI_ENABLED
+        roi_enabled = bool(data.get("roi_enabled")) or (os.getenv("ROI_ENABLED", "").strip() == "1")
+        roi_entry = _parse_roi_rect(data.get("roi_entry") or os.getenv("ROI_ENTRY"))
+        roi_exit = _parse_roi_rect(data.get("roi_exit") or os.getenv("ROI_EXIT"))
+        if roi_enabled and not (roi_entry or roi_exit):
+            _cam, saved_entry, saved_exit, saved_enabled = _load_saved_roi_settings()
+            if saved_enabled:
+                roi_entry = roi_entry or saved_entry
+                roi_exit = roi_exit or saved_exit
+
+        roi_result = None
+        forced_direction = None
+        plate = region = None
+        conf = 0.0
+        model_explanation = ""
+        ocr_log = ""
+        roi_used = ""
+
+        if roi_enabled and (roi_entry or roi_exit):
+            roi_result = process_ocr_with_rois(img, roi_entry, roi_exit)
+            best = roi_result.get("best")
+            if best:
+                plate = best["plate"]
+                region = best.get("region") or ""
+                conf = float(best.get("conf") or 0.0)
+                roi_used = best.get("roi") or ""
+                model_explanation = best.get("model_explanation") or ""
+                ocr_log = best.get("ocr_log") or ""
+
+                # Лок направления: если уже зафиксировали направление недавно — держим его
+                locked = get_locked_direction(plate)
+                roi_dir = roi_used if roi_used in ("entry", "exit") else None
+                if locked in ("entry", "exit"):
+                    forced_direction = locked
+                else:
+                    forced_direction = roi_dir
+
+                # Подтверждение попаданий (анти-ложняк)
+                if forced_direction in ("entry", "exit"):
+                    confirmed = register_roi_hit_and_confirm(plate, forced_direction)
+                    if not confirmed:
+                        # Не подтверждено — не считаем это событием
+                        plate = None
+                        region = ""
+                        conf = 0.0
+                        forced_direction = None
+                        roi_used = ""
+            else:
+                # Ни в одной ROI не нашли номер
+                model_explanation = "Шаблон номера РФ не обнаружен (ROI)."
+                ocr_log = (roi_result.get("entry", {}) or {}).get("ocr_log", "")
+        else:
+            model_explanation, ocr_log, plate, region, conf = process_ocr_pipeline(img)
+
+        logger.info("process_ip_camera: plate=%r region=%r conf=%.4f roi=%s", plate, region, float(conf or 0.0), roi_used)
         full_plate = f"{plate}{region}" if plate else ""
         is_duplicate_recent = mark_plate_event_and_check_duplicate(plate) if plate else False
         list_status = arm_db.resolve_list_status(plate) if plate else "none"
         auto_dir = visit_id = dur_sec = dur_human = dir_label = None
         exit_wo_applied = False
         if plate:
+            if forced_direction in ("entry", "exit"):
+                data = dict(data)
+                data["forced_direction"] = forced_direction
             auto_dir, visit_id, dur_sec, dur_human, dir_label, exit_wo_applied = recognition_sidecar(plate, data)
+
+            # после успешной регистрации — ставим лок, чтобы не было смены направления в окне
+            if forced_direction in ("entry", "exit"):
+                lock_direction(plate, forced_direction)
+
             dup_report = duplicate_flag_for_report(is_duplicate_recent, auto_dir)
             log_recognition_event(
                 session["user_id"],
@@ -982,7 +1411,28 @@ def process_ip_camera():
             "stay_duration_seconds": dur_sec,
             "stay_duration_human": dur_human,
             "exit_without_entry_applied": exit_wo_applied,
+            "roi_used": roi_used,
+            "roi_mode": bool(roi_enabled and (roi_entry or roi_exit)),
         }
+        # Для диагностики можно вернуть краткую сводку по ROI (не перегружая ответ)
+        if roi_result is not None:
+            try:
+                res["roi_debug"] = {
+                    "entry": {
+                        "plate": (roi_result.get("entry") or {}).get("plate", ""),
+                        "conf": float((roi_result.get("entry") or {}).get("conf", 0.0)),
+                    },
+                    "exit": {
+                        "plate": (roi_result.get("exit") or {}).get("plate", ""),
+                        "conf": float((roi_result.get("exit") or {}).get("conf", 0.0)),
+                    },
+                    "confirm_hits": ROI_CONFIRM_HITS,
+                    "confirm_window_s": ROI_CONFIRM_WINDOW_SECONDS,
+                    "lock_s": ROI_DIRECTION_LOCK_SECONDS,
+                    "min_conf": ROI_MIN_CONFIDENCE,
+                }
+            except Exception:
+                pass
         attach_ocr_meta(
             res,
             duplicate_flag_for_report(is_duplicate_recent, auto_dir) if plate else is_duplicate_recent,
@@ -1207,7 +1657,7 @@ def api_lists_add(list_type):
 
 
 @app.route("/api/lists/<int:entry_id>", methods=["DELETE"])
-@login_required
+@admin_required
 def api_lists_delete(entry_id):
     try:
         n = arm_db.delete_plate_list_entry(entry_id)
@@ -1217,6 +1667,59 @@ def api_lists_delete(entry_id):
     if not n:
         return jsonify({"error": "Запись не найдена"}), 404
     return jsonify({"ok": True}), 200
+
+
+@app.route("/api/admin/purge", methods=["POST"])
+@admin_required
+def api_admin_purge():
+    data = request.get_json(silent=True) or {}
+    scope = (data.get("scope") or "").strip().lower()
+    if not scope:
+        return jsonify({"error": "scope не указан"}), 400
+    try:
+        from_ts = data.get("from_ts")
+        to_ts = data.get("to_ts")
+        older_than_days = data.get("older_than_days")
+        arm_db.purge_data(scope, from_ts=from_ts, to_ts=to_ts, older_than_days=older_than_days)
+        logger.warning(
+            "admin purge: user=%s scope=%s from_ts=%r to_ts=%r older_than_days=%r",
+            session.get("username"),
+            scope,
+            from_ts,
+            to_ts,
+            older_than_days,
+        )
+    except Exception as e:
+        logger.exception("admin purge failed")
+        return jsonify({"error": str(e)}), 400
+    return jsonify({"ok": True}), 200
+
+
+@app.route("/api/admin/delete", methods=["POST"])
+@admin_required
+def api_admin_delete_one():
+    data = request.get_json(silent=True) or {}
+    kind = (data.get("kind") or "").strip().lower()
+    item_id = data.get("id")
+    if not kind or item_id is None:
+        return jsonify({"error": "kind и id обязательны"}), 400
+    try:
+        n = 0
+        if kind == "recognition":
+            n = arm_db.delete_recognition_event(item_id)
+        elif kind == "visit":
+            n = arm_db.delete_visit(item_id)
+        elif kind == "barrier":
+            n = arm_db.delete_barrier_action(item_id)
+        else:
+            return jsonify({"error": "kind: recognition|visit|barrier"}), 400
+        if not n:
+            return jsonify({"error": "Запись не найдена"}), 404
+        logger.warning("admin delete: user=%s kind=%s id=%s", session.get("username"), kind, item_id)
+        return jsonify({"ok": True}), 200
+    except Exception as e:
+        logger.exception("admin delete failed")
+        return jsonify({"error": str(e)}), 400
 
 # =================================================================
 # RUN

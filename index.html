@@ -69,6 +69,7 @@
         <button type="button" class="tab-btn px-4 py-2 rounded-lg font-semibold bg-indigo-600 text-white" data-tab="kpp">КПП / OCR</button>
         <button type="button" class="tab-btn px-4 py-2 rounded-lg font-semibold text-gray-600 hover:bg-gray-100" data-tab="journal">Журнал</button>
         <button type="button" class="tab-btn px-4 py-2 rounded-lg font-semibold text-gray-600 hover:bg-gray-100" data-tab="lists">Списки</button>
+        <button type="button" class="tab-btn px-4 py-2 rounded-lg font-semibold text-gray-600 hover:bg-gray-100" data-tab="roi">Настройка ROI</button>
     </div>
 
     <div class="mb-4 p-3 bg-slate-50 rounded-xl border border-slate-200">
@@ -294,6 +295,47 @@
             </select>
             <button type="button" id="journalRefreshBtn" class="px-4 py-2 bg-indigo-600 text-white rounded-lg font-semibold hover:bg-indigo-700">Обновить</button>
         </div>
+
+        <div id="journalAdminTools" class="hidden p-4 bg-white border border-red-200 rounded-xl">
+            <h3 class="text-lg font-semibold text-red-800 mb-2">Админ: удаление по периоду</h3>
+            <p class="text-sm text-red-700 mb-3">Удаление необратимо. Можно удалить по диапазону времени или “старше N дней”.</p>
+            <div class="grid grid-cols-1 md:grid-cols-4 gap-2 items-end">
+                <div>
+                    <label class="text-xs text-gray-600">Тип данных</label>
+                    <select id="purgeScopeSelect" class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm">
+                        <option value="recognitions">Распознавания</option>
+                        <option value="visits">Визиты</option>
+                        <option value="barrier">Открытия шлагбаума</option>
+                        <option value="lists">Списки</option>
+                        <option value="all">Всё</option>
+                    </select>
+                </div>
+                <div>
+                    <label class="text-xs text-gray-600">С (дата/время)</label>
+                    <input id="purgeFromInput" type="datetime-local" class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm">
+                </div>
+                <div>
+                    <label class="text-xs text-gray-600">По (дата/время)</label>
+                    <input id="purgeToInput" type="datetime-local" class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm">
+                </div>
+                <div>
+                    <label class="text-xs text-gray-600">Старше (дней)</label>
+                    <input id="purgeOlderDaysInput" type="number" min="0" step="1" placeholder="например 30"
+                           class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm">
+                </div>
+            </div>
+            <div class="flex flex-wrap gap-2 mt-3">
+                <button id="purgeRunBtn" type="button"
+                        class="px-4 py-2 bg-red-600 text-white font-semibold rounded-xl shadow hover:bg-red-700 transition">
+                    Удалить по условиям
+                </button>
+                <button id="purgeClearFiltersBtn" type="button"
+                        class="px-4 py-2 bg-slate-600 text-white font-semibold rounded-xl shadow hover:bg-slate-700 transition">
+                    Сбросить поля
+                </button>
+                <p id="journalPurgeStatus" class="ml-auto text-xs text-red-700 min-h-[1rem]"></p>
+            </div>
+        </div>
         <div class="overflow-x-auto border border-gray-200 rounded-xl">
             <table class="min-w-full text-sm text-left">
                 <thead class="bg-gray-100 text-gray-700">
@@ -306,6 +348,7 @@
                         <th class="p-2">Дубль</th>
                         <th class="p-2">Список</th>
                         <th class="p-2">Оператор</th>
+                        <th id="journalRecAdminTh" class="p-2 hidden">Удал.</th>
                     </tr>
                 </thead>
                 <tbody id="journalRecognitionsBody"></tbody>
@@ -324,6 +367,7 @@
                         <th class="p-2">Выезд</th>
                         <th class="p-2">На территории</th>
                         <th class="p-2">Без въезда</th>
+                        <th id="journalVisitsAdminTh" class="p-2 hidden">Удал.</th>
                     </tr>
                 </thead>
                 <tbody id="journalVisitsBody"></tbody>
@@ -341,6 +385,7 @@
                         <th class="p-2">Номер</th>
                         <th class="p-2">Оператор</th>
                         <th class="p-2">Примечание</th>
+                        <th id="journalBarrierAdminTh" class="p-2 hidden">Удал.</th>
                     </tr>
                 </thead>
                 <tbody id="journalBarrierBody"></tbody>
@@ -369,6 +414,88 @@
                 </div>
                 <button type="button" id="blackAddBtn" class="w-full py-2 bg-red-600 text-white rounded-lg font-semibold text-sm mb-3">Добавить</button>
                 <ul id="blackListUl" class="text-sm space-y-1 max-h-64 overflow-y-auto"></ul>
+            </div>
+        </div>
+    </div>
+
+    <div id="tabRoi" class="hidden space-y-4">
+        <div class="p-4 bg-gray-50 rounded-xl border border-gray-200">
+            <h3 class="text-xl font-semibold text-gray-800 mb-2">Настройка зон распознавания (ROI)</h3>
+            <p class="text-sm text-gray-600">
+                Настрой две зоны: <strong>Въезд</strong> (передний номер до шлагбаума) и <strong>Выезд</strong> (задний номер на территории).
+                Зоны сохраняются и используются автоматически.
+            </p>
+        </div>
+
+        <div class="p-4 bg-white rounded-xl border border-gray-200 space-y-3">
+            <label class="block text-sm font-medium text-gray-700">URL камеры (snapshot / RTSP)</label>
+            <input id="roiCameraUrlInput" type="url" placeholder="http://192.168.1.50:8080/shot.jpg"
+                   class="w-full px-3 py-2 border border-gray-300 rounded-lg">
+
+            <label class="flex items-start gap-3 cursor-pointer">
+                <input type="checkbox" id="roiEnabledCheckbox" class="mt-1 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500">
+                <span class="text-sm text-gray-700">
+                    <span class="font-semibold text-gray-800">Включить ROI-режим</span>
+                    — OCR работает только внутри зон, меньше ложных срабатываний и точное направление.
+                </span>
+            </label>
+
+            <div class="flex flex-wrap gap-2">
+                <button id="roiLoadSnapshotBtn" type="button"
+                        class="px-4 py-2 bg-indigo-600 text-white font-semibold rounded-xl shadow hover:bg-indigo-700 transition disabled:opacity-50">
+                    Получить кадр
+                </button>
+                <button id="roiResetBtn" type="button"
+                        class="px-4 py-2 bg-slate-600 text-white font-semibold rounded-xl shadow hover:bg-slate-700 transition disabled:opacity-50">
+                    Сбросить зоны
+                </button>
+                <button id="roiSaveBtn" type="button"
+                        class="ml-auto px-4 py-2 bg-green-600 text-white font-semibold rounded-xl shadow hover:bg-green-700 transition disabled:opacity-50">
+                    Сохранить
+                </button>
+            </div>
+            <p id="roiStatusLine" class="text-xs text-gray-600 min-h-[1rem]"></p>
+        </div>
+
+        <div id="adminDbTools" class="p-4 bg-white rounded-xl border border-red-200">
+            <h3 class="text-lg font-semibold text-red-800 mb-2">Инструменты администратора</h3>
+            <p class="text-sm text-red-700 mb-3">
+                Внимание: эти действия удаляют данные из базы. Отменить нельзя.
+            </p>
+            <div class="flex flex-wrap gap-2">
+                <button id="purgeRecognitionsBtn" type="button"
+                        class="px-4 py-2 bg-red-600 text-white font-semibold rounded-xl shadow hover:bg-red-700 transition">
+                    Очистить журнал распознаваний
+                </button>
+                <button id="purgeVisitsBtn" type="button"
+                        class="px-4 py-2 bg-red-600 text-white font-semibold rounded-xl shadow hover:bg-red-700 transition">
+                    Очистить визиты
+                </button>
+                <button id="purgeAllBtn" type="button"
+                        class="ml-auto px-4 py-2 bg-red-700 text-white font-semibold rounded-xl shadow hover:bg-red-800 transition">
+                    Очистить ВСЁ
+                </button>
+            </div>
+            <p id="purgeStatusLine" class="text-xs text-red-700 mt-3 min-h-[1rem]"></p>
+        </div>
+
+        <div class="p-3 bg-amber-50 border border-amber-200 rounded-xl text-sm text-amber-900">
+            Подсказка: не включай в ROI лишние области (КПП, шлагбаум, фон). Чем меньше лишнего — тем стабильнее OCR.
+        </div>
+
+        <div class="p-4 bg-white rounded-xl border border-gray-200">
+            <div class="relative w-full overflow-hidden rounded-lg border border-gray-200 bg-slate-50" id="roiStage"
+                 style="aspect-ratio: 16 / 9;">
+                <img id="roiSnapshotImg" alt="Кадр с камеры" class="absolute inset-0 w-full h-full object-contain select-none pointer-events-none" src="">
+                <div id="roiOverlay" class="absolute inset-0"></div>
+            </div>
+            <div class="mt-3 grid grid-cols-1 md:grid-cols-2 gap-2 text-xs">
+                <div class="p-2 rounded border border-blue-200 bg-blue-50 text-blue-900">
+                    <strong>ROI ВЪЕЗД</strong>: <span id="roiEntryText">—</span>
+                </div>
+                <div class="p-2 rounded border border-emerald-200 bg-emerald-50 text-emerald-900">
+                    <strong>ROI ВЫЕЗД</strong>: <span id="roiExitText">—</span>
+                </div>
             </div>
         </div>
     </div>
@@ -428,6 +555,32 @@
     const tabKpp = document.getElementById('tabKpp');
     const tabJournal = document.getElementById('tabJournal');
     const tabLists = document.getElementById('tabLists');
+    const tabRoi = document.getElementById('tabRoi');
+
+    const roiCameraUrlInput = document.getElementById('roiCameraUrlInput');
+    const roiEnabledCheckbox = document.getElementById('roiEnabledCheckbox');
+    const roiLoadSnapshotBtn = document.getElementById('roiLoadSnapshotBtn');
+    const roiResetBtn = document.getElementById('roiResetBtn');
+    const roiSaveBtn = document.getElementById('roiSaveBtn');
+    const roiStatusLine = document.getElementById('roiStatusLine');
+    const roiSnapshotImg = document.getElementById('roiSnapshotImg');
+    const roiOverlay = document.getElementById('roiOverlay');
+    const roiEntryText = document.getElementById('roiEntryText');
+    const roiExitText = document.getElementById('roiExitText');
+    const roiStage = document.getElementById('roiStage');
+    const adminDbTools = document.getElementById('adminDbTools');
+    const purgeRecognitionsBtn = document.getElementById('purgeRecognitionsBtn');
+    const purgeVisitsBtn = document.getElementById('purgeVisitsBtn');
+    const purgeAllBtn = document.getElementById('purgeAllBtn');
+    const purgeStatusLine = document.getElementById('purgeStatusLine');
+    const journalAdminTools = document.getElementById('journalAdminTools');
+    const purgeScopeSelect = document.getElementById('purgeScopeSelect');
+    const purgeFromInput = document.getElementById('purgeFromInput');
+    const purgeToInput = document.getElementById('purgeToInput');
+    const purgeOlderDaysInput = document.getElementById('purgeOlderDaysInput');
+    const purgeRunBtn = document.getElementById('purgeRunBtn');
+    const purgeClearFiltersBtn = document.getElementById('purgeClearFiltersBtn');
+    const journalPurgeStatus = document.getElementById('journalPurgeStatus');
 
     function pageDirectoryBaseHref() {
         const u = new URL(window.location.href);
@@ -460,6 +613,10 @@
     let LIST_WHITE_URL;
     let LIST_BLACK_URL;
     let MANUAL_VISIT_URL;
+    let ROI_SETTINGS_URL;
+    let ROI_SNAPSHOT_URL;
+    let ADMIN_PURGE_URL;
+    let ADMIN_DELETE_URL;
 
     const q = API_FROM_QUERY && API_FROM_QUERY.trim();
     const m = API_FROM_META && API_FROM_META.trim();
@@ -486,6 +643,10 @@
     LIST_WHITE_URL = `${API_BASE}/api/lists/white`;
     LIST_BLACK_URL = `${API_BASE}/api/lists/black`;
     MANUAL_VISIT_URL = `${API_BASE}/api/manual/visit`;
+    ROI_SETTINGS_URL = `${API_BASE}/api/settings/roi`;
+    ROI_SNAPSHOT_URL = `${API_BASE}/api/camera/snapshot`;
+    ADMIN_PURGE_URL = `${API_BASE}/api/admin/purge`;
+    ADMIN_DELETE_URL = `${API_BASE}/api/admin/delete`;
 
     let currentStream = null;
     let ipLiveTimer = null;
@@ -506,6 +667,11 @@
     let motionNotifyClearTimer = null;
     let lastPlateBase = '';
     let lastPlateFull = '';
+    let currentUserRole = '';
+
+    function isAdmin() {
+        return (currentUserRole || '').toLowerCase() === 'admin';
+    }
 
     function apiFetch(url, options = {}) {
         const merged = {
@@ -698,12 +864,31 @@
     function showLoginView() {
         loginPanel.classList.remove('hidden');
         armApp.classList.add('hidden');
+        currentUserRole = '';
     }
 
-    function showArmView(username) {
+    function showArmView(username, role) {
         loginPanel.classList.add('hidden');
         armApp.classList.remove('hidden');
         if (operatorName) operatorName.textContent = username || '—';
+        currentUserRole = role || '';
+
+        // Скрываем вкладку ROI для не-админов
+        document.querySelectorAll('.tab-btn').forEach((b) => {
+            const name = b.getAttribute('data-tab');
+            if (name === 'roi') {
+                b.classList.toggle('hidden', !isAdmin());
+            }
+        });
+
+        // admin-only headers in Journal tables
+        const th1 = document.getElementById('journalRecAdminTh');
+        const th2 = document.getElementById('journalVisitsAdminTh');
+        const th3 = document.getElementById('journalBarrierAdminTh');
+        if (th1) th1.classList.toggle('hidden', !isAdmin());
+        if (th2) th2.classList.toggle('hidden', !isAdmin());
+        if (th3) th3.classList.toggle('hidden', !isAdmin());
+        if (journalAdminTools) journalAdminTools.classList.toggle('hidden', !isAdmin());
     }
 
     function displayError(message) {
@@ -1126,7 +1311,7 @@
             const r = await apiFetch(AUTH_ME_URL, { method: 'GET', mode: 'cors' });
             const j = await r.json().catch(() => ({}));
             if (j.authenticated) {
-                showArmView(j.username);
+                showArmView(j.username, j.role);
                 return true;
             }
         } catch (e) {
@@ -1181,7 +1366,32 @@
             const td7 = document.createElement('td');
             td7.className = 'p-2';
             td7.textContent = row.operator || '';
-            tr.append(td0, td1, td2, td3, td4, td5, td6, td7);
+            if (isAdmin()) {
+                const tdDel = document.createElement('td');
+                tdDel.className = 'p-2';
+                const btn = document.createElement('button');
+                btn.type = 'button';
+                btn.className = 'text-red-600 text-xs font-semibold hover:underline';
+                btn.textContent = 'Удал.';
+                btn.addEventListener('click', async () => {
+                    const ok = confirm('Удалить эту запись распознавания?');
+                    if (!ok) return;
+                    const r = await apiFetch(ADMIN_DELETE_URL, {
+                        method: 'POST',
+                        mode: 'cors',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ kind: 'recognition', id: row.id }),
+                    });
+                    if (r.status === 401) { showLoginView(); return; }
+                    const j = await r.json().catch(() => ({}));
+                    if (!r.ok) { alert(j.error || `Ошибка: ${r.status}`); return; }
+                    void loadJournalTables();
+                });
+                tdDel.appendChild(btn);
+                tr.append(td0, td1, td2, td3, td4, td5, td6, td7, tdDel);
+            } else {
+                tr.append(td0, td1, td2, td3, td4, td5, td6, td7);
+            }
             recBody.appendChild(tr);
         });
         if (meta) meta.textContent = `Всего записей (по фильтру): ${data.total ?? (data.items || []).length}`;
@@ -1211,7 +1421,32 @@
                 const c4 = document.createElement('td');
                 c4.className = 'p-2 text-xs';
                 c4.textContent = row.note || '';
-                tr.append(c0, c1, c2, c3, c4);
+                if (isAdmin()) {
+                    const cDel = document.createElement('td');
+                    cDel.className = 'p-2';
+                    const btn = document.createElement('button');
+                    btn.type = 'button';
+                    btn.className = 'text-red-600 text-xs font-semibold hover:underline';
+                    btn.textContent = 'Удал.';
+                    btn.addEventListener('click', async () => {
+                        const ok = confirm('Удалить это событие открытия шлагбаума?');
+                        if (!ok) return;
+                        const r = await apiFetch(ADMIN_DELETE_URL, {
+                            method: 'POST',
+                            mode: 'cors',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ kind: 'barrier', id: row.id }),
+                        });
+                        if (r.status === 401) { showLoginView(); return; }
+                        const j = await r.json().catch(() => ({}));
+                        if (!r.ok) { alert(j.error || `Ошибка: ${r.status}`); return; }
+                        void loadJournalTables();
+                    });
+                    cDel.appendChild(btn);
+                    tr.append(c0, c1, c2, c3, c4, cDel);
+                } else {
+                    tr.append(c0, c1, c2, c3, c4);
+                }
                 barBody.appendChild(tr);
             });
         }
@@ -1243,7 +1478,32 @@
                 const e = document.createElement('td');
                 e.className = 'p-2 text-xs';
                 e.textContent = row.exit_without_entry ? 'да' : 'нет';
-                tr.append(a, b, c, d, e);
+                if (isAdmin()) {
+                    const del = document.createElement('td');
+                    del.className = 'p-2';
+                    const btn = document.createElement('button');
+                    btn.type = 'button';
+                    btn.className = 'text-red-600 text-xs font-semibold hover:underline';
+                    btn.textContent = 'Удал.';
+                    btn.addEventListener('click', async () => {
+                        const ok = confirm('Удалить этот визит?');
+                        if (!ok) return;
+                        const r = await apiFetch(ADMIN_DELETE_URL, {
+                            method: 'POST',
+                            mode: 'cors',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ kind: 'visit', id: row.id }),
+                        });
+                        if (r.status === 401) { showLoginView(); return; }
+                        const j = await r.json().catch(() => ({}));
+                        if (!r.ok) { alert(j.error || `Ошибка: ${r.status}`); return; }
+                        void loadJournalTables();
+                    });
+                    del.appendChild(btn);
+                    tr.append(a, b, c, d, e, del);
+                } else {
+                    tr.append(a, b, c, d, e);
+                }
                 visBody.appendChild(tr);
             });
         }
@@ -1274,19 +1534,28 @@
                 const mid = document.createElement('span');
                 mid.className = 'text-xs text-gray-500 truncate';
                 mid.textContent = it.note || '';
-                const del = document.createElement('button');
-                del.type = 'button';
-                del.className = 'text-red-600 text-xs shrink-0';
-                del.textContent = 'Удал.';
-                del.addEventListener('click', async () => {
-                    const resp = await apiFetch(`${API_BASE}/api/lists/${it.id}`, { method: 'DELETE', mode: 'cors' });
-                    if (resp.status === 401) {
-                        showLoginView();
-                        return;
-                    }
-                    if (resp.ok) await loadPlateLists();
-                });
-                li.append(left, mid, del);
+                if (isAdmin()) {
+                    const del = document.createElement('button');
+                    del.type = 'button';
+                    del.className = 'text-red-600 text-xs shrink-0';
+                    del.textContent = 'Удал.';
+                    del.addEventListener('click', async () => {
+                        const resp = await apiFetch(`${API_BASE}/api/lists/${it.id}`, { method: 'DELETE', mode: 'cors' });
+                        if (resp.status === 401) {
+                            showLoginView();
+                            return;
+                        }
+                        const j = await resp.json().catch(() => ({}));
+                        if (resp.status === 403) {
+                            alert(j.error || 'Требуются права администратора');
+                            return;
+                        }
+                        if (resp.ok) await loadPlateLists();
+                    });
+                    li.append(left, mid, del);
+                } else {
+                    li.append(left, mid);
+                }
                 ul.appendChild(li);
             });
         }
@@ -1295,6 +1564,9 @@
     }
 
     function setActiveTab(name) {
+        if (name === 'roi' && !isAdmin()) {
+            name = 'kpp';
+        }
         document.querySelectorAll('.tab-btn').forEach((b) => {
             const on = b.getAttribute('data-tab') === name;
             b.classList.toggle('bg-indigo-600', on);
@@ -1305,9 +1577,492 @@
         tabKpp.classList.toggle('hidden', name !== 'kpp');
         tabJournal.classList.toggle('hidden', name !== 'journal');
         tabLists.classList.toggle('hidden', name !== 'lists');
+        if (tabRoi) tabRoi.classList.toggle('hidden', name !== 'roi');
         if (name === 'journal') void loadJournalTables();
         if (name === 'lists') void loadPlateLists();
+        if (name === 'roi') void roiInitAndLoad();
     }
+
+    // ============================================================
+    // ROI Editor (две зоны, мышкой)
+    // ============================================================
+    let roiState = {
+        camera_url: '',
+        roi_enabled: false,
+        entry: null, // [x1,y1,x2,y2] normalized
+        exit: null,
+        snapshotNatural: { w: 0, h: 0 },
+        snapshotLoaded: false,
+    };
+
+    function roiSetStatus(msg, isError = false) {
+        if (!roiStatusLine) return;
+        roiStatusLine.textContent = msg || '';
+        roiStatusLine.classList.toggle('text-red-700', !!isError);
+        roiStatusLine.classList.toggle('text-gray-600', !isError);
+    }
+
+    function clamp01(v) {
+        v = Number(v);
+        if (Number.isNaN(v)) return 0;
+        return Math.max(0, Math.min(1, v));
+    }
+
+    function normRect(r) {
+        if (!r || r.length !== 4) return null;
+        let [x1, y1, x2, y2] = r.map(Number);
+        x1 = clamp01(x1); y1 = clamp01(y1); x2 = clamp01(x2); y2 = clamp01(y2);
+        const nx1 = Math.min(x1, x2);
+        const nx2 = Math.max(x1, x2);
+        const ny1 = Math.min(y1, y2);
+        const ny2 = Math.max(y1, y2);
+        // минимальный размер, чтобы не было "нулевых" зон
+        if (nx2 - nx1 < 0.01 || ny2 - ny1 < 0.01) return null;
+        return [nx1, ny1, nx2, ny2];
+    }
+
+    function fmtRect(r) {
+        if (!r) return '—';
+        return r.map((v) => Number(v).toFixed(3)).join(', ');
+    }
+
+    function roiUpdateText() {
+        if (roiEntryText) roiEntryText.textContent = fmtRect(roiState.entry);
+        if (roiExitText) roiExitText.textContent = fmtRect(roiState.exit);
+    }
+
+    function roiGetContainRect() {
+        // Возвращает прямоугольник (в пикселях) той области внутри roiStage,
+        // где реально отрисована картинка с object-contain.
+        if (!roiStage || !roiSnapshotImg) return null;
+        const stageRect = roiStage.getBoundingClientRect();
+        const w = stageRect.width;
+        const h = stageRect.height;
+        const natW = roiSnapshotImg.naturalWidth || roiState.snapshotNatural.w || 0;
+        const natH = roiSnapshotImg.naturalHeight || roiState.snapshotNatural.h || 0;
+        if (!natW || !natH || !w || !h) {
+            return { left: 0, top: 0, width: w, height: h };
+        }
+        const scale = Math.min(w / natW, h / natH);
+        const dw = natW * scale;
+        const dh = natH * scale;
+        const left = (w - dw) / 2;
+        const top = (h - dh) / 2;
+        return { left, top, width: dw, height: dh };
+    }
+
+    function roiRectNormToPx(r) {
+        const c = roiGetContainRect();
+        if (!c || !r) return null;
+        const [x1, y1, x2, y2] = r;
+        const left = c.left + x1 * c.width;
+        const top = c.top + y1 * c.height;
+        const width = (x2 - x1) * c.width;
+        const height = (y2 - y1) * c.height;
+        return { left, top, width, height };
+    }
+
+    function roiRectPxToNorm(box) {
+        const c = roiGetContainRect();
+        if (!c || !box) return null;
+        const x1 = (box.left - c.left) / c.width;
+        const y1 = (box.top - c.top) / c.height;
+        const x2 = (box.left + box.width - c.left) / c.width;
+        const y2 = (box.top + box.height - c.top) / c.height;
+        return normRect([x1, y1, x2, y2]);
+    }
+
+    function roiEnsureDefaults() {
+        if (!roiState.entry) roiState.entry = [0.08, 0.40, 0.42, 0.88];
+        if (!roiState.exit) roiState.exit = [0.58, 0.40, 0.92, 0.88];
+        roiState.entry = normRect(roiState.entry) || [0.08, 0.40, 0.42, 0.88];
+        roiState.exit = normRect(roiState.exit) || [0.58, 0.40, 0.92, 0.88];
+        roiUpdateText();
+    }
+
+    function roiMakeBoxEl(kind) {
+        const el = document.createElement('div');
+        el.className = 'absolute border-2 rounded-md shadow-sm';
+        el.style.cursor = 'move';
+        el.dataset.kind = kind;
+        if (kind === 'entry') {
+            el.style.borderColor = 'rgb(59 130 246)'; // blue-500
+            el.style.backgroundColor = 'rgba(59,130,246,0.10)';
+        } else {
+            el.style.borderColor = 'rgb(16 185 129)'; // emerald-500
+            el.style.backgroundColor = 'rgba(16,185,129,0.10)';
+        }
+
+        const label = document.createElement('div');
+        label.className = 'absolute -top-6 left-0 text-xs font-semibold px-2 py-0.5 rounded';
+        label.style.color = 'white';
+        label.style.backgroundColor = (kind === 'entry') ? 'rgb(37 99 235)' : 'rgb(5 150 105)';
+        label.textContent = kind === 'entry' ? 'ВЪЕЗД' : 'ВЫЕЗД';
+        el.appendChild(label);
+
+        // handles
+        const handles = [
+            ['nw', 'cursor-nwse-resize'],
+            ['ne', 'cursor-nesw-resize'],
+            ['sw', 'cursor-nesw-resize'],
+            ['se', 'cursor-nwse-resize'],
+        ];
+        handles.forEach(([pos, cursor]) => {
+            const h = document.createElement('div');
+            h.dataset.handle = pos;
+            h.className = 'absolute w-3 h-3 bg-white rounded border border-gray-700';
+            h.style.cursor = cursor;
+            const off = '-6px';
+            if (pos === 'nw') { h.style.left = off; h.style.top = off; }
+            if (pos === 'ne') { h.style.right = off; h.style.top = off; }
+            if (pos === 'sw') { h.style.left = off; h.style.bottom = off; }
+            if (pos === 'se') { h.style.right = off; h.style.bottom = off; }
+            el.appendChild(h);
+        });
+
+        return el;
+    }
+
+    let roiBoxEntryEl = null;
+    let roiBoxExitEl = null;
+
+    function roiRender() {
+        if (!roiOverlay) return;
+        if (!roiBoxEntryEl) {
+            roiOverlay.innerHTML = '';
+            roiBoxEntryEl = roiMakeBoxEl('entry');
+            roiBoxExitEl = roiMakeBoxEl('exit');
+            roiOverlay.appendChild(roiBoxEntryEl);
+            roiOverlay.appendChild(roiBoxExitEl);
+            roiBindDragResize(roiBoxEntryEl);
+            roiBindDragResize(roiBoxExitEl);
+        }
+        const entryPx = roiRectNormToPx(roiState.entry);
+        const exitPx = roiRectNormToPx(roiState.exit);
+        if (entryPx) {
+            roiBoxEntryEl.style.left = `${entryPx.left}px`;
+            roiBoxEntryEl.style.top = `${entryPx.top}px`;
+            roiBoxEntryEl.style.width = `${entryPx.width}px`;
+            roiBoxEntryEl.style.height = `${entryPx.height}px`;
+            roiBoxEntryEl.style.display = 'block';
+        } else {
+            roiBoxEntryEl.style.display = 'none';
+        }
+        if (exitPx) {
+            roiBoxExitEl.style.left = `${exitPx.left}px`;
+            roiBoxExitEl.style.top = `${exitPx.top}px`;
+            roiBoxExitEl.style.width = `${exitPx.width}px`;
+            roiBoxExitEl.style.height = `${exitPx.height}px`;
+            roiBoxExitEl.style.display = 'block';
+        } else {
+            roiBoxExitEl.style.display = 'none';
+        }
+        roiUpdateText();
+    }
+
+    function roiBindDragResize(boxEl) {
+        let active = null; // {mode, handle, startX, startY, startBoxPx}
+        const kind = boxEl.dataset.kind;
+
+        function onPointerDown(ev) {
+            if (!roiState.snapshotLoaded) return;
+            const t = ev.target;
+            const handle = t && t.dataset ? t.dataset.handle : '';
+            const mode = handle ? 'resize' : 'move';
+            ev.preventDefault();
+            boxEl.setPointerCapture(ev.pointerId);
+            const rect = boxEl.getBoundingClientRect();
+            const stageRect = roiStage.getBoundingClientRect();
+            active = {
+                mode,
+                handle,
+                startX: ev.clientX,
+                startY: ev.clientY,
+                startBoxPx: {
+                    left: rect.left - stageRect.left,
+                    top: rect.top - stageRect.top,
+                    width: rect.width,
+                    height: rect.height,
+                },
+            };
+        }
+
+        function onPointerMove(ev) {
+            if (!active) return;
+            const dx = ev.clientX - active.startX;
+            const dy = ev.clientY - active.startY;
+            let b = { ...active.startBoxPx };
+
+            if (active.mode === 'move') {
+                b.left += dx;
+                b.top += dy;
+            } else {
+                const minSize = 18;
+                if (active.handle === 'nw') { b.left += dx; b.top += dy; b.width -= dx; b.height -= dy; }
+                if (active.handle === 'ne') { b.top += dy; b.width += dx; b.height -= dy; }
+                if (active.handle === 'sw') { b.left += dx; b.width -= dx; b.height += dy; }
+                if (active.handle === 'se') { b.width += dx; b.height += dy; }
+                if (b.width < minSize) b.width = minSize;
+                if (b.height < minSize) b.height = minSize;
+            }
+
+            // clamp to contain rect
+            const c = roiGetContainRect();
+            if (c) {
+                const maxL = c.left + c.width;
+                const maxT = c.top + c.height;
+                b.left = Math.max(c.left, Math.min(maxL - b.width, b.left));
+                b.top = Math.max(c.top, Math.min(maxT - b.height, b.top));
+            }
+
+            // commit
+            const nr = roiRectPxToNorm(b);
+            if (nr) {
+                roiState[kind] = nr;
+                roiRender();
+            }
+        }
+
+        function onPointerUp(ev) {
+            if (!active) return;
+            try { boxEl.releasePointerCapture(ev.pointerId); } catch (e) { /* ignore */ }
+            active = null;
+        }
+
+        boxEl.addEventListener('pointerdown', onPointerDown);
+        boxEl.addEventListener('pointermove', onPointerMove);
+        boxEl.addEventListener('pointerup', onPointerUp);
+        boxEl.addEventListener('pointercancel', onPointerUp);
+    }
+
+    async function roiInitAndLoad() {
+        if (!tabRoi) return;
+        roiSetStatus('');
+        if (adminDbTools) adminDbTools.classList.toggle('hidden', !isAdmin());
+        try {
+            const r = await apiFetch(ROI_SETTINGS_URL, { method: 'GET', mode: 'cors' });
+            if (r.status === 401) { showLoginView(); return; }
+            if (r.status === 403) {
+                // На всякий случай: UI уже прячет вкладку, но если дошли сюда — вернёмся на КПП
+                setActiveTab('kpp');
+                return;
+            }
+            const j = await r.json().catch(() => ({}));
+            if (!r.ok) throw new Error(j.error || `Ошибка: ${r.status}`);
+            roiState.camera_url = j.camera_url || '';
+            roiState.roi_enabled = !!j.roi_enabled;
+            roiState.entry = normRect(j.roi_entry) || null;
+            roiState.exit = normRect(j.roi_exit) || null;
+            if (roiCameraUrlInput) roiCameraUrlInput.value = roiState.camera_url;
+            if (roiEnabledCheckbox) roiEnabledCheckbox.checked = roiState.roi_enabled;
+            roiEnsureDefaults();
+            roiRender();
+            if (roiState.camera_url) {
+                roiSetStatus('Готово. Нажми «Получить кадр», чтобы выставить зоны точно по изображению.');
+            } else {
+                roiSetStatus('Укажи URL камеры и нажми «Получить кадр».');
+            }
+        } catch (e) {
+            roiSetStatus(e.message || String(e), true);
+        }
+    }
+
+    function purgeSetStatus(msg, isError = false) {
+        if (!purgeStatusLine) return;
+        purgeStatusLine.textContent = msg || '';
+        purgeStatusLine.classList.toggle('text-red-800', !!isError);
+        purgeStatusLine.classList.toggle('text-red-700', !isError);
+    }
+
+    async function adminPurge(scope) {
+        if (!isAdmin()) return;
+        purgeSetStatus('');
+        const human = scope === 'recognitions' ? 'журнал распознаваний'
+            : scope === 'visits' ? 'визиты'
+            : scope === 'all' ? 'ВСЁ'
+            : scope;
+        const ok = confirm(`Удалить ${human} из базы? Это нельзя отменить.`);
+        if (!ok) return;
+        try {
+            const r = await apiFetch(ADMIN_PURGE_URL, {
+                method: 'POST',
+                mode: 'cors',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ scope }),
+            });
+            if (r.status === 401) { showLoginView(); return; }
+            const j = await r.json().catch(() => ({}));
+            if (!r.ok || !j.ok) throw new Error(j.error || `Ошибка: ${r.status}`);
+            purgeSetStatus(`Готово: очищено (${human}).`);
+            // обновим журнал, если он открыт
+            if (!tabJournal.classList.contains('hidden')) void loadJournalTables();
+        } catch (e) {
+            purgeSetStatus(e.message || String(e), true);
+        }
+    }
+
+    if (purgeRecognitionsBtn) purgeRecognitionsBtn.addEventListener('click', () => void adminPurge('recognitions'));
+    if (purgeVisitsBtn) purgeVisitsBtn.addEventListener('click', () => void adminPurge('visits'));
+    if (purgeAllBtn) purgeAllBtn.addEventListener('click', () => void adminPurge('all'));
+
+    function journalPurgeSetStatus(msg, isError = false) {
+        if (!journalPurgeStatus) return;
+        journalPurgeStatus.textContent = msg || '';
+        journalPurgeStatus.classList.toggle('text-red-800', !!isError);
+        journalPurgeStatus.classList.toggle('text-red-700', !isError);
+    }
+
+    function dtLocalToUnixSeconds(v) {
+        if (!v) return null;
+        const d = new Date(v);
+        const t = d.getTime();
+        if (!t || Number.isNaN(t)) return null;
+        return Math.floor(t / 1000);
+    }
+
+    async function journalAdminPurgeRun() {
+        if (!isAdmin()) return;
+        journalPurgeSetStatus('');
+        const scope = (purgeScopeSelect?.value || '').trim();
+        const from_ts = dtLocalToUnixSeconds(purgeFromInput?.value || '');
+        const to_ts = dtLocalToUnixSeconds(purgeToInput?.value || '');
+        const older = (purgeOlderDaysInput?.value || '').trim();
+        const older_than_days = older !== '' ? Number(older) : null;
+        if (!scope) {
+            journalPurgeSetStatus('Выбери тип данных.', true);
+            return;
+        }
+        if (older_than_days != null && (Number.isNaN(older_than_days) || older_than_days < 0)) {
+            journalPurgeSetStatus('Поле “старше (дней)” должно быть >= 0.', true);
+            return;
+        }
+        const msgParts = [];
+        if (from_ts != null) msgParts.push('с указанной даты');
+        if (to_ts != null) msgParts.push('по указанную дату');
+        if (older_than_days != null) msgParts.push(`старше ${older_than_days} дн`);
+        const hint = msgParts.length ? ` (${msgParts.join(', ')})` : ' (всё без фильтра)';
+        const ok = confirm(`Удалить данные: ${scope}${hint}? Это нельзя отменить.`);
+        if (!ok) return;
+
+        try {
+            const payload = { scope };
+            if (from_ts != null) payload.from_ts = from_ts;
+            if (to_ts != null) payload.to_ts = to_ts;
+            if (older_than_days != null) payload.older_than_days = older_than_days;
+            const r = await apiFetch(ADMIN_PURGE_URL, {
+                method: 'POST',
+                mode: 'cors',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+            });
+            if (r.status === 401) { showLoginView(); return; }
+            const j = await r.json().catch(() => ({}));
+            if (!r.ok || !j.ok) throw new Error(j.error || `Ошибка: ${r.status}`);
+            journalPurgeSetStatus('Готово: удаление выполнено.');
+            void loadJournalTables();
+        } catch (e) {
+            journalPurgeSetStatus(e.message || String(e), true);
+        }
+    }
+
+    function journalAdminPurgeClear() {
+        if (purgeFromInput) purgeFromInput.value = '';
+        if (purgeToInput) purgeToInput.value = '';
+        if (purgeOlderDaysInput) purgeOlderDaysInput.value = '';
+        journalPurgeSetStatus('');
+    }
+
+    if (purgeRunBtn) purgeRunBtn.addEventListener('click', () => void journalAdminPurgeRun());
+    if (purgeClearFiltersBtn) purgeClearFiltersBtn.addEventListener('click', journalAdminPurgeClear);
+
+    async function roiLoadSnapshot() {
+        roiSetStatus('');
+        const url = (roiCameraUrlInput?.value || '').trim();
+        if (!url) {
+            roiSetStatus('Укажи URL камеры.', true);
+            return;
+        }
+        roiLoadSnapshotBtn.disabled = true;
+        try {
+            const r = await apiFetch(ROI_SNAPSHOT_URL, {
+                method: 'POST',
+                mode: 'cors',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ camera_url: url }),
+            });
+            if (r.status === 401) { showLoginView(); return; }
+            const j = await r.json().catch(() => ({}));
+            if (!r.ok) throw new Error(j.error || `Ошибка: ${r.status}`);
+            roiState.camera_url = j.camera_url || url;
+            roiState.snapshotNatural = { w: Number(j.width || 0), h: Number(j.height || 0) };
+            roiState.snapshotLoaded = true;
+            if (roiSnapshotImg) roiSnapshotImg.src = j.preview_data_url || '';
+            roiSetStatus('Кадр получен. Перетащи и растяни прямоугольники мышкой, затем нажми «Сохранить».');
+            // после загрузки img нужно дождаться layout
+            setTimeout(() => roiRender(), 50);
+        } catch (e) {
+            roiSetStatus(e.message || String(e), true);
+        } finally {
+            roiLoadSnapshotBtn.disabled = false;
+        }
+    }
+
+    function roiReset() {
+        roiState.entry = null;
+        roiState.exit = null;
+        roiEnsureDefaults();
+        roiRender();
+        roiSetStatus('Зоны сброшены к значениям по умолчанию.');
+    }
+
+    async function roiSave() {
+        roiSetStatus('');
+        const url = (roiCameraUrlInput?.value || '').trim();
+        if (!url) {
+            roiSetStatus('Укажи URL камеры.', true);
+            return;
+        }
+        const entry = normRect(roiState.entry);
+        const exitR = normRect(roiState.exit);
+        if (!entry || !exitR) {
+            roiSetStatus('Обе зоны должны быть заданы (въезд и выезд).', true);
+            return;
+        }
+        roiSaveBtn.disabled = true;
+        try {
+            const payload = {
+                camera_url: url,
+                roi_enabled: !!roiEnabledCheckbox?.checked,
+                roi_entry: entry,
+                roi_exit: exitR,
+            };
+            const r = await apiFetch(ROI_SETTINGS_URL, {
+                method: 'POST',
+                mode: 'cors',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+            });
+            if (r.status === 401) { showLoginView(); return; }
+            const j = await r.json().catch(() => ({}));
+            if (!r.ok || !j.ok) throw new Error(j.error || `Ошибка: ${r.status}`);
+            roiState.camera_url = url;
+            roiState.roi_enabled = !!payload.roi_enabled;
+            roiSetStatus('Сохранено. ROI-режим будет применяться автоматически при распознавании.');
+        } catch (e) {
+            roiSetStatus(e.message || String(e), true);
+        } finally {
+            roiSaveBtn.disabled = false;
+        }
+    }
+
+    if (roiLoadSnapshotBtn) roiLoadSnapshotBtn.addEventListener('click', () => void roiLoadSnapshot());
+    if (roiResetBtn) roiResetBtn.addEventListener('click', roiReset);
+    if (roiSaveBtn) roiSaveBtn.addEventListener('click', () => void roiSave());
+    window.addEventListener('resize', () => {
+        if (tabRoi && !tabRoi.classList.contains('hidden')) {
+            roiRender();
+        }
+    });
     
     // --- EVENT LISTENERS ---
     document.querySelectorAll('.tab-btn').forEach((b) => {
@@ -1331,7 +2086,7 @@
                 loginError.classList.remove('hidden');
                 return;
             }
-            showArmView(j.username);
+            showArmView(j.username, j.role);
             await checkServiceStatus();
         } catch (e) {
             loginError.textContent = e.message || 'Сеть недоступна';

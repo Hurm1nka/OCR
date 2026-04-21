@@ -62,6 +62,17 @@ def _migrate_schema(conn):
         "CREATE INDEX IF NOT EXISTS idx_vehicle_visits_entered ON vehicle_visits(entered_at DESC)"
     )
 
+    # Глобальные настройки приложения (на объект/инсталляцию)
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS app_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            updated_at INTEGER NOT NULL
+        )
+        """
+    )
+
 
 def init_db():
     with get_conn() as conn:
@@ -122,6 +133,56 @@ def init_db():
         _migrate_schema(conn)
 
 
+def get_setting(key, default=None):
+    if not key:
+        return default
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT value FROM app_settings WHERE key = ?",
+            (str(key),),
+        ).fetchone()
+        if not row:
+            return default
+        return row["value"]
+
+
+def set_setting(key, value):
+    if not key:
+        raise ValueError("key is required")
+    now = int(time.time())
+    v = "" if value is None else str(value)
+    with get_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO app_settings (key, value, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET
+                value = excluded.value,
+                updated_at = excluded.updated_at
+            """,
+            (str(key), v, now),
+        )
+
+
+def get_roi_settings():
+    """
+    Возвращает (camera_url, roi_entry, roi_exit, roi_enabled).
+    roi_* хранятся как JSON-строки с нормализованными координатами [x1,y1,x2,y2].
+    """
+    camera_url = get_setting("camera_url", "") or ""
+    roi_entry = get_setting("roi_entry", "") or ""
+    roi_exit = get_setting("roi_exit", "") or ""
+    roi_enabled = (get_setting("roi_enabled", "0") or "0").strip() == "1"
+    return camera_url, roi_entry, roi_exit, roi_enabled
+
+
+def set_roi_settings(camera_url, roi_entry_json, roi_exit_json, roi_enabled):
+    set_setting("camera_url", camera_url or "")
+    set_setting("roi_entry", roi_entry_json or "")
+    set_setting("roi_exit", roi_exit_json or "")
+    set_setting("roi_enabled", "1" if roi_enabled else "0")
+
+
 def ensure_default_guard_user():
     """Один пользователь по умолчанию, если таблица пуста."""
     initial_password = os.environ.get("INITIAL_GUARD_PASSWORD", "guard123")
@@ -136,6 +197,96 @@ def ensure_default_guard_user():
                 "INSERT INTO users (username, password_hash, role, created_at) VALUES (?, ?, ?, ?)",
                 ("guard", h, "guard", now),
             )
+
+
+def ensure_default_admin_user():
+    """
+    Админ по умолчанию. Создаётся, если пользователя 'admin' ещё нет.
+    Пароль: INITIAL_ADMIN_PASSWORD (по умолчанию admin123).
+    """
+    initial_password = os.environ.get("INITIAL_ADMIN_PASSWORD", "admin123")
+    with _lock:
+        with get_conn() as conn:
+            row = conn.execute("SELECT id FROM users WHERE username = ?", ("admin",)).fetchone()
+            if row:
+                return
+            h = generate_password_hash(initial_password)
+            now = int(time.time())
+            conn.execute(
+                "INSERT INTO users (username, password_hash, role, created_at) VALUES (?, ?, ?, ?)",
+                ("admin", h, "admin", now),
+            )
+
+
+def _ts_bounds(from_ts=None, to_ts=None, older_than_days=None):
+    ft = None if from_ts in (None, "") else int(from_ts)
+    tt = None if to_ts in (None, "") else int(to_ts)
+    if older_than_days not in (None, ""):
+        days = float(older_than_days)
+        if days < 0:
+            raise ValueError("older_than_days must be >= 0")
+        cutoff = int(time.time()) - int(days * 86400)
+        # "старше N дней" -> всё, что <= cutoff
+        tt = cutoff if tt is None else min(tt, cutoff)
+    return ft, tt
+
+
+def purge_data(scope, from_ts=None, to_ts=None, older_than_days=None):
+    """
+    Удаление данных (для админа) с опциональными ограничениями по времени.
+
+    scope: 'recognitions'|'visits'|'barrier'|'lists'|'all'
+    from_ts/to_ts: unix seconds (включительно)
+    older_than_days: число дней (удалить записи старше N дней)
+    """
+    allowed = {"recognitions", "visits", "barrier", "lists", "all"}
+    if scope not in allowed:
+        raise ValueError("scope must be one of: recognitions, visits, barrier, lists, all")
+    ft, tt = _ts_bounds(from_ts, to_ts, older_than_days)
+
+    def _where(field):
+        parts = []
+        args = []
+        if ft is not None:
+            parts.append(f"{field} >= ?")
+            args.append(int(ft))
+        if tt is not None:
+            parts.append(f"{field} <= ?")
+            args.append(int(tt))
+        return (" WHERE " + " AND ".join(parts)) if parts else "", args
+
+    with get_conn() as conn:
+        if scope in ("recognitions", "all"):
+            w, a = _where("created_at")
+            conn.execute(f"DELETE FROM recognition_events{w}", tuple(a))
+        if scope in ("barrier", "all"):
+            w, a = _where("created_at")
+            conn.execute(f"DELETE FROM barrier_actions{w}", tuple(a))
+        if scope in ("visits", "all"):
+            # удаляем визиты по времени события: берем coalesce(exited_at, entered_at)
+            w, a = _where("COALESCE(exited_at, entered_at)")
+            conn.execute(f"DELETE FROM vehicle_visits{w}", tuple(a))
+        if scope in ("lists", "all"):
+            w, a = _where("created_at")
+            conn.execute(f"DELETE FROM plate_lists{w}", tuple(a))
+
+
+def delete_recognition_event(rec_id):
+    with get_conn() as conn:
+        cur = conn.execute("DELETE FROM recognition_events WHERE id = ?", (int(rec_id),))
+        return cur.rowcount
+
+
+def delete_barrier_action(action_id):
+    with get_conn() as conn:
+        cur = conn.execute("DELETE FROM barrier_actions WHERE id = ?", (int(action_id),))
+        return cur.rowcount
+
+
+def delete_visit(visit_id):
+    with get_conn() as conn:
+        cur = conn.execute("DELETE FROM vehicle_visits WHERE id = ?", (int(visit_id),))
+        return cur.rowcount
 
 
 def get_user_by_username(username):
@@ -270,6 +421,91 @@ def apply_visit_for_recognition(plate_base, user_id, exit_without_entry):
                 (plate_base, now, user_id),
             )
             return "exit_no_entry", cur.lastrowid, None, True
+
+        cur = conn.execute(
+            """
+            INSERT INTO vehicle_visits
+            (plate_base, entered_at, exited_at, duration_seconds, exit_without_entry, entry_user_id)
+            VALUES (?, ?, NULL, NULL, 0, ?)
+            """,
+            (plate_base, now, user_id),
+        )
+        return "entry", cur.lastrowid, None, False
+
+
+def apply_visit_forced_direction(plate_base, user_id, forced_direction, exit_without_entry):
+    """
+    Применение визита с принудительным направлением (из ROI/датчиков).
+
+    Возвращает (direction, visit_id, duration_seconds, exit_without_entry_applied).
+    forced_direction: 'entry' | 'exit'
+
+    Правила:
+    - forced 'exit': закрывает открытый визит, иначе создаёт 'exit_no_entry' (если разрешено).
+    - forced 'entry': создаёт визит только если открытого нет; если уже есть открытый — не создаёт новый.
+      (это защищает БД от дублей при дребезге распознавания).
+    """
+    if forced_direction not in ("entry", "exit"):
+        raise ValueError("forced_direction must be 'entry' or 'exit'")
+
+    now = int(time.time())
+    exit_without_entry = bool(exit_without_entry)
+    with get_conn() as conn:
+        open_v = conn.execute(
+            """
+            SELECT id, plate_base, entered_at, exited_at, exit_without_entry
+            FROM vehicle_visits
+            WHERE plate_base = ? AND exited_at IS NULL
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (plate_base,),
+        ).fetchone()
+
+        if forced_direction == "exit":
+            if open_v:
+                vid = open_v["id"]
+                entered = open_v["entered_at"]
+                dur = None
+                if entered is not None:
+                    dur = max(0, now - int(entered))
+                conn.execute(
+                    """
+                    UPDATE vehicle_visits
+                    SET exited_at = ?, duration_seconds = ?, exit_user_id = ?
+                    WHERE id = ?
+                    """,
+                    (now, dur, user_id, vid),
+                )
+                return "exit", vid, dur, False
+
+            if exit_without_entry:
+                cur = conn.execute(
+                    """
+                    INSERT INTO vehicle_visits
+                    (plate_base, entered_at, exited_at, duration_seconds, exit_without_entry, exit_user_id)
+                    VALUES (?, NULL, ?, NULL, 1, ?)
+                    """,
+                    (plate_base, now, user_id),
+                )
+                return "exit_no_entry", cur.lastrowid, None, True
+
+            # Выезд без открытого визита, но без разрешения — трактуем как обычный въезд,
+            # чтобы не "съесть" событие (поведение совместимо с текущей логикой).
+            cur = conn.execute(
+                """
+                INSERT INTO vehicle_visits
+                (plate_base, entered_at, exited_at, duration_seconds, exit_without_entry, entry_user_id)
+                VALUES (?, ?, NULL, NULL, 0, ?)
+                """,
+                (plate_base, now, user_id),
+            )
+            return "entry", cur.lastrowid, None, False
+
+        # forced 'entry'
+        if open_v:
+            vid = open_v["id"]
+            return "entry", vid, None, False
 
         cur = conn.execute(
             """
